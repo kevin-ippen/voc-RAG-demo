@@ -7,6 +7,17 @@ from typing import Optional, List, Dict
 import streamlit as st
 import pandas as pd
 
+with st.expander("Auth env check"):
+    st.write({
+        "HOST set": bool(os.getenv("DATABRICKS_HOST")),
+        "CLIENT_ID set": bool(os.getenv("DATABRICKS_CLIENT_ID")),
+        "CLIENT_SECRET set": bool(os.getenv("DATABRICKS_CLIENT_SECRET")),
+        "TOKEN_ENDPOINT set": bool(os.getenv("DATABRICKS_OAUTH_TOKEN_ENDPOINT")),
+        "TOKEN set (PAT)": bool(os.getenv("DATABRICKS_TOKEN")),
+        "AUTH_TYPE": os.getenv("DATABRICKS_AUTH_TYPE"),
+    })
+
+
 # ----- Databricks clients -----
 from mlflow.deployments import get_deploy_client
 from databricks.vector_search.client import VectorSearchClient
