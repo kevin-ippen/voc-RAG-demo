@@ -9,9 +9,19 @@ class Config:
     VECTOR_SEARCH_ENDPOINT = "dbdemos_vs_endpoint"
     VECTOR_INDEX_NAME = "users.kevin_ippen.voc_chunks_index"
     
+    # Model Serving Configuration
+    LLM_ENDPOINT_NAME = "databricks-llama-2-70b-chat"  # Update with your actual LLM endpoint
+    # Alternative endpoints you might have:
+    # LLM_ENDPOINT_NAME = "databricks-dbrx-instruct"
+    # LLM_ENDPOINT_NAME = "your-custom-llm-endpoint"
+    
     # Search Configuration
     DEFAULT_NUM_RESULTS = 5
     MAX_NUM_RESULTS = 20
+    
+    # LLM Configuration
+    LLM_TEMPERATURE = 0.3
+    LLM_MAX_TOKENS = 500
     
     # Available satisfaction levels
     SATISFACTION_LEVELS = [
@@ -94,7 +104,8 @@ Answer:"""
         "vector_search_init": "Failed to initialize vector search. Please check your configuration.",
         "search_failed": "Search failed. Please try a different query.",
         "no_results": "No matching customer comments found. Try different search terms.",
-        "rag_failed": "Failed to generate insights. Please try again."
+        "rag_failed": "Failed to generate insights. Please try again.",
+        "llm_failed": "Failed to generate AI response. Please check model serving endpoint."
     }
     
     @classmethod
@@ -108,7 +119,8 @@ Answer:"""
         required_settings = [
             cls.VECTOR_SEARCH_ENDPOINT,
             cls.VECTOR_INDEX_NAME,
-            cls.SEARCH_COLUMNS
+            cls.SEARCH_COLUMNS,
+            cls.LLM_ENDPOINT_NAME
         ]
         
         return all(setting for setting in required_settings)

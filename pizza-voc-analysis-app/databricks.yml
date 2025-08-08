@@ -11,7 +11,7 @@ workspace:
 apps:
   pizza_voc_app:
     name: pizza-voc-analysis
-    description: "AI-powered pizza company customer feedback analysis using RAG and vector search"
+    description: "AI-powered pizza company customer feedback analysis using RAG and vector search with model serving"
     
     # App source configuration
     source_code_path: ./
@@ -51,7 +51,7 @@ apps:
       - key: "environment"
         value: "production"
 
-# Permissions (optional - adjust based on your needs)
+# Permissions (adjust based on your needs)
 permissions:
   - level: CAN_MANAGE
     group_name: "data-science-team"
@@ -66,19 +66,31 @@ resources:
       name: "dbdemos_vs_endpoint"
       endpoint_type: "STANDARD"
 
+  # Model serving endpoints (reference existing foundation models)
+  model_serving_endpoints:
+    llm_endpoint:
+      name: "databricks-llama-2-70b-chat"
+      # Additional model serving endpoints you might use:
+      # name: "databricks-dbrx-instruct"
+      # name: "databricks-mixtral-8x7b-instruct"
+      # name: "your-custom-llm-endpoint"
+
 # Variables for different environments
 variables:
   development:
     vector_search_endpoint: "dbdemos_vs_endpoint"
     vector_index_name: "users.kevin_ippen.voc_chunks_index"
+    llm_endpoint: "databricks-llama-2-70b-chat"
     
   staging:
     vector_search_endpoint: "dbdemos_vs_endpoint"
     vector_index_name: "users.kevin_ippen.voc_chunks_index"
+    llm_endpoint: "databricks-llama-2-70b-chat"
     
   production:
     vector_search_endpoint: "dbdemos_vs_endpoint" 
     vector_index_name: "users.kevin_ippen.voc_chunks_index"
+    llm_endpoint: "databricks-llama-2-70b-chat"
 
 # Target configuration for different environments
 targets:
@@ -100,3 +112,22 @@ targets:
     # Production-specific configurations
     run_as:
       service_principal_name: ${var.service_principal_name}
+
+# Required permissions for the service principal
+# Note: These need to be granted manually in the Databricks UI
+required_permissions:
+  unity_catalog:
+    - catalog: "pizza_voc"
+      privilege: "USE CATALOG"
+    - schema: "pizza_voc.customer_feedback" 
+      privilege: "USE SCHEMA"
+    - table: "pizza_voc.customer_feedback.voc_chunks_index"
+      privilege: "SELECT"
+  
+  vector_search:
+    - endpoint: "dbdemos_vs_endpoint"
+      privilege: "CAN_QUERY_ENDPOINT"
+  
+  model_serving:
+    - endpoint: "databricks-llama-2-70b-chat"
+      privilege: "CAN_QUERY"

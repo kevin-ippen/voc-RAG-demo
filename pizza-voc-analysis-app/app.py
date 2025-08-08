@@ -45,11 +45,28 @@ def initialize_rag_system():
             num_results=1
         )
         
+        # Test model serving connection
+        from databricks.sdk import WorkspaceClient
+        workspace_client = WorkspaceClient()
+        
+        try:
+            # Test model serving endpoint
+            test_response = workspace_client.serving_endpoints.query(
+                name=Config.LLM_ENDPOINT_NAME,
+                prompt="Test connection",
+                temperature=0.1,
+                max_tokens=10
+            )
+            model_serving_available = True
+        except Exception as model_error:
+            print(f"Model serving test failed: {model_error}")
+            model_serving_available = False
+        
         # If we get here, vector search is working
         vector_manager = VectorSearchManager()
         rag_pipeline = RAGPipeline(vector_manager)
         
-        return vector_manager, rag_pipeline
+        return vector_manager, rag_pipeline, model_serving_available
         
     except Exception as e:
         # Provide more specific error information
@@ -101,12 +118,23 @@ def main():
     # Initialize RAG system with proper error handling
     vector_manager = None
     rag_pipeline = None
+    model_serving_available = False
     initialization_success = False
     
     try:
-        vector_manager, rag_pipeline = initialize_rag_system()
+        vector_manager, rag_pipeline, model_serving_available = initialize_rag_system()
         st.success("✅ RAG system initialized successfully!")
+        
+        if model_serving_available:
+            st.success("✅ Model serving endpoint accessible!")
+        else:
+            st.warning("⚠️ Model serving endpoint not accessible. AI insights will be limited.")
+            
         initialization_success = True
+        
+        # Store model serving status in session state
+        st.session_state.model_serving_available = model_serving_available
+        
     except Exception as e:
         st.error(f"❌ Failed to initialize RAG system: {str(e)}")
         st.error("Please check your configuration and try again.")
@@ -114,12 +142,14 @@ def main():
         **Common issues:**
         - Vector search endpoint not accessible
         - Vector index not found or not ready
+        - Model serving endpoint not found
         - Authentication/permission issues
         
         **To fix:**
         1. Verify your vector search endpoint is running
         2. Check that the vector index exists and is online
-        3. Ensure proper Unity Catalog permissions
+        3. Verify model serving endpoint exists and has proper permissions
+        4. Ensure proper Unity Catalog permissions
         """)
         # Don't stop completely, show the error state
         initialization_success = False
@@ -147,6 +177,32 @@ def main():
         
         if satisfaction_filter == "All":
             satisfaction_filter = None
+        
+        # LLM settings
+        model_serving_available = st.session_state.get('model_serving_available', False)
+        
+        if model_serving_available:
+            use_llm = st.checkbox("🤖 Generate AI Insights", value=True, help="Use LLM to generate insights from customer feedback")
+            st.session_state.use_llm = use_llm
+            
+            if use_llm:
+                with st.expander("🔧 LLM Settings"):
+                    temperature = st.slider("Response creativity:", 0.0, 1.0, Config.LLM_TEMPERATURE, 0.1, 
+                                          help="Higher values make responses more creative")
+                    max_tokens = st.slider("Response length:", 100, 1000, Config.LLM_MAX_TOKENS, 50,
+                                         help="Maximum length of AI response")
+                    
+                    # Store in session state for use in main app
+                    st.session_state.llm_temperature = temperature
+                    st.session_state.llm_max_tokens = max_tokens
+            else:
+                st.session_state.llm_temperature = Config.LLM_TEMPERATURE
+                st.session_state.llm_max_tokens = Config.LLM_MAX_TOKENS
+        else:
+            st.info("🤖 AI insights unavailable (model serving endpoint not accessible)")
+            st.session_state.use_llm = False
+            st.session_state.llm_temperature = Config.LLM_TEMPERATURE
+            st.session_state.llm_max_tokens = Config.LLM_MAX_TOKENS
         
         st.divider()
         
@@ -293,15 +349,26 @@ def show_question_interface(rag_pipeline: RAGPipeline, num_results: int, satisfa
         ask_button = st.button("🔍 Ask Question", type="primary")
     
     if ask_button and question:
+        # Get LLM settings from session state
+        use_llm = st.session_state.get('model_serving_available', False) and st.session_state.get('use_llm', True)
+        
         with st.spinner("Analyzing customer feedback..."):
             try:
-                response = rag_pipeline.ask_question(question, num_results, satisfaction_filter)
+                response = rag_pipeline.ask_question(question, num_results, satisfaction_filter, use_llm=use_llm)
             except Exception as e:
                 st.error(f"❌ Error processing question: {str(e)}")
                 return
         
         if response["status"] == "success":
             st.success(f"✅ Found {response['contexts_found']} relevant customer comments")
+            
+            # Show AI-generated insights if available
+            if response.get("llm_response") and use_llm:
+                st.subheader("🤖 AI-Generated Insights")
+                with st.container():
+                    st.markdown(response["llm_response"])
+                    
+                st.divider()
             
             # Show satisfaction distribution
             if response["metadata"]:
