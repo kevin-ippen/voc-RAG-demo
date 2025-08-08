@@ -2,76 +2,68 @@ import os
 from typing import Any, Dict, List, Optional
 
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.core import Config
+from databricks.sdk.core import Config, ApiClient
 
-# Vector Search SDK compat (older vs newer signatures)
-try:
-    from databricks.vector_search.client import VectorSearchClient
-except Exception:
-    # very old name (unlikely now, but safe)
-    from databricks.vector_search import VectorSearchClient  # type: ignore
+# Try to import the VS client (module paths have shifted over time)
+VS_CLIENT_IMPORT_ERRORS = []
+VectorSearchClient = None
+for mod in (
+    "databricks.vector_search.client",
+    "databricks.vector_search",  # older
+):
+    try:
+        m = __import__(mod, fromlist=["VectorSearchClient"])
+        VectorSearchClient = getattr(m, "VectorSearchClient")
+        break
+    except Exception as e:
+        VS_CLIENT_IMPORT_ERRORS.append((mod, str(e)))
+        continue
 
 
-# -------------------- Auth / WS --------------------
 def _make_ws() -> WorkspaceClient:
-    """
-    Create a WorkspaceClient using one of:
-      1) Service Principal (CLIENT_ID/SECRET + HOST)
-      2) PAT (TOKEN + HOST)
-      3) Default env/metadata if available
-    Raises with a clear message if nothing is usable.
-    """
+    """Create a WorkspaceClient using SP (oauth-m2m) or PAT, falling back to default env."""
     host = os.getenv("DATABRICKS_HOST")
-
-    client_id = os.getenv("DATABRICKS_CLIENT_ID")
-    client_secret = os.getenv("DATABRICKS_CLIENT_SECRET")
+    cid = os.getenv("DATABRICKS_CLIENT_ID")
+    csec = os.getenv("DATABRICKS_CLIENT_SECRET")
     auth_type = (os.getenv("DATABRICKS_AUTH_TYPE") or "").lower()
-
     pat = os.getenv("DATABRICKS_TOKEN")
 
-    # Prefer explicit service principal when provided (or when oauth-m2m is set)
-    if client_id and client_secret and host and (auth_type in ("", "oauth-m2m", "m2m")):
-        cfg = Config(
-            host=host,
-            client_id=client_id,
-            client_secret=client_secret,
-            auth_type="oauth-m2m",
+    # Prefer SP if supplied (and/or oauth-m2m signaled)
+    if host and cid and csec and (auth_type in ("", "oauth-m2m", "m2m")):
+        return WorkspaceClient(
+            config=Config(host=host, client_id=cid, client_secret=csec, auth_type="oauth-m2m")
         )
-        return WorkspaceClient(config=cfg)
 
-    # PAT fallback
-    if pat and host:
-        cfg = Config(host=host, token=pat)
-        return WorkspaceClient(config=cfg)
+    # PAT
+    if host and pat:
+        return WorkspaceClient(config=Config(host=host, token=pat))
 
-    # Final fallback to whatever env/metadata the SDK can pick up (e.g., dev boxes)
+    # SDK default (env/metadata)
     try:
         return WorkspaceClient()
     except Exception as e:
         raise RuntimeError(
-            "Failed to initialize Databricks auth. Set **either**:\n"
-            " - Service principal: DATABRICKS_HOST, DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET, "
-            "  (optional) DATABRICKS_AUTH_TYPE=oauth-m2m\n"
-            " - OR a PAT: DATABRICKS_HOST, DATABRICKS_TOKEN\n"
-            f"Details: {e}"
+            "Failed to initialize Databricks auth. Set either SP (HOST, CLIENT_ID, CLIENT_SECRET, AUTH_TYPE=oauth-m2m) "
+            "or PAT (HOST, TOKEN). Details: " + str(e)
         )
 
 
-# -------------------- Vector Search Manager --------------------
 class VectorSearchManager:
     """
-    Thin wrapper around Vector Search queries that:
-      - Handles SDK signature differences
-      - Centralizes endpoint + index configuration
-      - Normalizes results
+    Wrapper that tolerates multiple VectorSearchClient versions.
+    If the import/constructor fails, uses REST fallback through WorkspaceClient.api_client.
     """
 
     def __init__(self, ws: WorkspaceClient):
         self.ws = ws
-
-        # Allow env override; defer to config.py if you have one, else pure env is fine
-        self.endpoint_name = os.getenv("VECTOR_SEARCH_ENDPOINT") or os.getenv("VECTORSEARCH_ENDPOINT")
-        self.index_fqn = os.getenv("VECTOR_INDEX_NAME") or os.getenv("VECTORSEARCH_INDEX")
+        self.endpoint_name = (
+            os.getenv("VECTOR_SEARCH_ENDPOINT")
+            or os.getenv("VECTORSEARCH_ENDPOINT")
+        )
+        self.index_fqn = (
+            os.getenv("VECTOR_INDEX_NAME")
+            or os.getenv("VECTORSEARCH_INDEX")
+        )
 
         if not self.endpoint_name:
             raise ValueError("VECTOR_SEARCH_ENDPOINT is not set.")
@@ -81,60 +73,101 @@ class VectorSearchManager:
                 "(e.g., main.vs_schema.voc_chunks_index)."
             )
 
-        # Build client with best-effort compatibility
-        self.vs = None
+        self._client = self._build_client_or_none()
+
+    def _build_client_or_none(self):
+        """Try many signatures; return client or None (REST fallback)."""
+        if VectorSearchClient is None:
+            return None
+
+        attempts = [
+            {"workspace_client": self.ws},                 # newer
+            {"workspace": self.ws},                        # some mid versions logged 'workspace' (rare)
+            {"api_client": self.ws.api_client},            # older accepted ApiClient
+            {"config": self.ws.config},                    # some accepted Config directly
+            {"workspace_url": self.ws.config.host, "personal_access_token": self.ws.config.token},  # very old
+        ]
+
         last_err = None
-        for kw in ("workspace_client", "workspace"):
+        for kwargs in attempts:
             try:
-                self.vs = VectorSearchClient(**{kw: self.ws})
-                break
+                return VectorSearchClient(**kwargs)
             except TypeError as e:
                 last_err = e
                 continue
-        if self.vs is None:
-            raise RuntimeError(
-                f"Failed to create VectorSearchClient; upgrade 'databricks-vectorsearch' package. Last error: {last_err}"
-            )
+            except Exception as e:
+                last_err = e
+                continue
 
-    # ---- Public API ----
+        # Could not construct a typed client — we'll REST-fallback in search()
+        # Keep the last error for debug
+        self._ctor_error = last_err
+        return None
+
     def search(
         self,
         query_text: str,
         top_k: int = 10,
         **filters: Optional[str],
     ) -> List[Dict[str, Any]]:
-        """
-        Perform a semantic search. Optional filters are passed as metadata filters if your index supports them.
-        Returns a list of dicts with keys like: text, score, and metadata fields (if present).
-        """
         if not query_text:
             return []
 
-        # Build filter dict excluding falsy values
         meta_filters = {k: v for k, v in filters.items() if v}
 
-        # Call VS query with param-name compatibility
-        kwargs = {
-            "index_name": self.index_fqn,
+        if self._client is not None:
+            # Use the typed client, handling top_k/num_results rename
+            kwargs = {
+                "index_name": self.index_fqn,
+                "endpoint_name": self.endpoint_name,
+                "query_text": query_text,
+            }
+            try:
+                res = self._client.indexes.query_index(num_results=top_k, filters=meta_filters, **kwargs)
+            except TypeError:
+                res = self._client.indexes.query_index(top_k=top_k, filters=meta_filters, **kwargs)
+
+            hits = getattr(res, "result", None) or getattr(res, "data", None) or []
+            return self._normalize_hits(hits)
+
+        # ---------- REST fallback ----------
+        # Endpoint (stable across versions):
+        # POST /api/2.0/vector-search/indexes/{index_fqn}/query
+        body: Dict[str, Any] = {
+            "query": {"query_text": query_text},
+            "num_results": top_k,
             "endpoint_name": self.endpoint_name,
-            "query_text": query_text,
         }
+        if meta_filters:
+            body["filters"] = {"metadata": meta_filters}
 
-        # Handle num_results/top_k variation across SDK versions
         try:
-            result = self.vs.indexes.query_index(num_results=top_k, filters=meta_filters, **kwargs)
-        except TypeError:
-            result = self.vs.indexes.query_index(top_k=top_k, filters=meta_filters, **kwargs)
+            raw = self.ws.api_client.do(
+                "POST",
+                f"/api/2.0/vector-search/indexes/{self.index_fqn}/query",
+                body=body,
+            )
+        except Exception as e:
+            detail = getattr(self, "_ctor_error", None)
+            raise RuntimeError(
+                "Vector search failed. Client ctor error: "
+                f"{detail}; REST error: {e}"
+            )
 
-        # Normalize results
+        # Older responses usually return {"data": [ ... ]} or {"result": [...]}
+        hits = raw.get("result") or raw.get("data") or []
+        return self._normalize_hits(hits)
+
+    @staticmethod
+    def _normalize_hits(hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
-        hits = getattr(result, "result", None) or getattr(result, "data", None) or []
         for h in hits:
-            # Try common shapes
-            text = h.get("text") or h.get("chunk") or h.get("document", {}).get("text")
+            # try common shapes
+            text = h.get("text") or h.get("chunk") or (h.get("document") or {}).get("text")
             score = h.get("score") or h.get("similarity")
-            meta = h.get("metadata") or h.get("document", {}).get("metadata") or {}
+            meta = h.get("metadata") or (h.get("document") or {}).get("metadata") or {}
             row = {"text": text, "score": score}
-            row.update(meta if isinstance(meta, dict) else {})
+            if isinstance(meta, dict):
+                row.update(meta)
             out.append(row)
         return out
