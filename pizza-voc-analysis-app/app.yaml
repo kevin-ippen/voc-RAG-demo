@@ -22,9 +22,9 @@ env:
   - name: DATABRICKS_HOST
     value: e2-demo-field-eng.cloud.databricks.com
   - name: VECTOR_SEARCH_ENDPOINT
-    value: users.kevin_ippen.voc_chunks_index
+    value: dbdemos_vs_endpoint
   - name: VECTOR_INDEX_NAME
-    value: users.kevin_ippen.voc_pizza_chunks_for_index
+    value: users.kevin_ippen.voc_pizza_index
   - name: LLM_ENDPOINT
     value: databricks-gpt-oss-20b
   - name: SQL_WAREHOUSE_HTTP_PATH
