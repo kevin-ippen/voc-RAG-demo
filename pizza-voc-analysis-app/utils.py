@@ -1,346 +1,309 @@
+# utils.py
 """
 Utility classes and functions for the Pizza VOC Analysis Databricks App.
+Hardened for auth (SP/PAT/OBO), env-driven config, and schema-safe parsing.
 """
 
-from databricks.vector_search.client import VectorSearchClient
-from typing import Dict, List, Any, Optional
+from __future__ import annotations
+import os
 import logging
+from typing import Dict, List, Any, Optional, Tuple
 
-from config import Config
+from databricks.sdk import WorkspaceClient
+from databricks.sdk.core import Config as SDKConfig
+from databricks.vector_search.client import VectorSearchClient
 
-# Set up logging
+try:
+    # Optional – if you keep your prompts/labels in config.py
+    from config import Config as AppConfig
+except Exception:
+    AppConfig = None  # it's fine if you don't have one
+
+log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
+
+# ---------------------- Auth helpers ---------------------- #
+def _make_ws(obo_token: Optional[str] = None) -> WorkspaceClient:
+    """
+    Build a WorkspaceClient with the strongest available auth:
+      1) Injected Service Principal (oauth-m2m) if CLIENT_ID/SECRET present
+      2) PAT via DATABRICKS_TOKEN
+      3) OBO bearer token passed in explicitly (viewer identity)
+    """
+    host = os.getenv("DATABRICKS_HOST")
+    if not host or not host.startswith("http"):
+        raise RuntimeError("DATABRICKS_HOST missing or invalid (must include https://)")
+
+    cid = os.getenv("DATABRICKS_CLIENT_ID")
+    csec = os.getenv("DATABRICKS_CLIENT_SECRET")
+    auth_type = os.getenv("DATABRICKS_AUTH_TYPE")
+    token = os.getenv("DATABRICKS_TOKEN")
+    token_endpoint = os.getenv("DATABRICKS_OAUTH_TOKEN_ENDPOINT")  # usually not needed on AWS
+
+    # 1) Service Principal (preferred)
+    if cid and csec:
+        cfg = SDKConfig(
+            host=host,
+            auth_type="oauth-m2m",  # force SP path
+            client_id=cid,
+            client_secret=csec,
+            oauth_token_endpoint=token_endpoint,  # harmless if None on AWS
+        )
+        return WorkspaceClient(config=cfg)
+
+    # 2) PAT
+    if token:
+        cfg = SDKConfig(host=host, token=token)
+        return WorkspaceClient(config=cfg)
+
+    # 3) OBO (viewer token passed by caller)
+    if obo_token:
+        cfg = SDKConfig(host=host, token=obo_token)
+        return WorkspaceClient(config=cfg)
+
+    # If user explicitly set oauth-m2m but the creds are missing, tell them
+    if auth_type == "oauth-m2m":
+        raise RuntimeError(
+            "DATABRICKS_AUTH_TYPE=oauth-m2m but CLIENT_ID/SECRET not found. "
+            "Ensure the app runs as a service principal or set the env vars."
+        )
+
+    raise RuntimeError(
+        "No credentials found. Provide Service Principal (CLIENT_ID/SECRET), a PAT (DATABRICKS_TOKEN), "
+        "or pass an OBO token to VectorSearchManager(..., obo_token=...)."
+    )
+
+
+# ---------------------- Config helpers ---------------------- #
+def _env(name: str, fallback: Optional[str] = None) -> Optional[str]:
+    v = os.getenv(name)
+    return v if (v is not None and str(v).strip() != "") else fallback
+
+
+def _resolve_config() -> Tuple[str, str, List[str]]:
+    """
+    Resolve endpoint, index, and columns from env first, then AppConfig defaults.
+    """
+    endpoint = _env("VECTOR_SEARCH_ENDPOINT", getattr(AppConfig, "VECTOR_SEARCH_ENDPOINT", None) if AppConfig else None)
+    index = _env("VECTOR_INDEX_NAME", getattr(AppConfig, "VECTOR_INDEX_NAME", None) if AppConfig else None)
+
+    default_cols = [
+        "id",
+        "text",
+        "satisfaction",
+        "service_method",
+        "customer_type",
+        "order_source",
+        "order_date",
+        "service_time",
+    ]
+    columns = getattr(AppConfig, "SEARCH_COLUMNS", default_cols) if AppConfig else default_cols
+
+    if not endpoint:
+        raise ValueError("VECTOR_SEARCH_ENDPOINT is not set (env or config).")
+    if not index or "." not in index:
+        raise ValueError("VECTOR_INDEX_NAME is missing or not a full path (catalog.schema.name).")
+
+    return endpoint, index, columns
+
+
+# ---------------------- Vector Search ---------------------- #
 class VectorSearchManager:
     """Manages vector search operations for customer feedback."""
-    
-    def __init__(self):
-        """Initialize the vector search manager."""
-        self.client = VectorSearchClient(disable_notice=True)
-        self.endpoint_name = Config.VECTOR_SEARCH_ENDPOINT
-        self.index_name = Config.VECTOR_INDEX_NAME
-        self.search_columns = Config.SEARCH_COLUMNS
-        
-        # Validate configuration
-        if not Config.validate_config():
-            raise ValueError("Invalid configuration. Please check your settings.")
-    
+
+    def __init__(
+        self,
+        ws: Optional[WorkspaceClient] = None,
+        endpoint_name: Optional[str] = None,
+        index_name: Optional[str] = None,
+        search_columns: Optional[List[str]] = None,
+        obo_token: Optional[str] = None,
+    ):
+        """
+        Initialize the vector search manager.
+
+        Args:
+            ws: Optional prebuilt WorkspaceClient (auth already configured)
+            endpoint_name: VS endpoint name (env/config used if None)
+            index_name: Fully-qualified index name (catalog.schema.index)
+            search_columns: List of columns to retrieve from the index
+            obo_token: Optional viewer token to use OBO auth (if SP/PAT not configured)
+        """
+        if ws is None:
+            ws = _make_ws(obo_token=obo_token)
+
+        self.client = VectorSearchClient(workspace=ws, disable_notice=True)
+
+        # Resolve endpoint/index/columns
+        env_endpoint, env_index, env_cols = _resolve_config()
+        self.endpoint_name = endpoint_name or env_endpoint
+        self.index_name = index_name or env_index
+        self.search_columns = search_columns or env_cols
+
+        # Basic validation
+        if not self.endpoint_name:
+            raise ValueError("Vector Search endpoint name is required.")
+        if not self.index_name or "." not in self.index_name:
+            raise ValueError("Vector Search index name must be a full path (catalog.schema.index).")
+
+        # Lazily created index handle
+        self._index = None
+
     def _get_index(self):
-        """Get the vector search index."""
-        try:
-            return self.client.get_index(
+        """Get and cache the vector search index handle."""
+        if self._index is None:
+            self._index = self.client.get_index(
                 endpoint_name=self.endpoint_name,
-                index_name=self.index_name
+                index_name=self.index_name,
             )
-        except Exception as e:
-            logger.error(f"Failed to get vector index: {str(e)}")
-            raise
-    
-    def search_feedback(self, query: str, num_results: int = 5, satisfaction_filter: Optional[str] = None) -> List[List]:
+        return self._index
+
+    @staticmethod
+    def _build_expr(
+        satisfaction: Optional[str] = None,
+        service_method: Optional[str] = None,
+        customer_type: Optional[str] = None,
+        order_source: Optional[str] = None,
+    ) -> Optional[str]:
+        """Build a VS expr filter string."""
+        parts = []
+        if satisfaction:
+            parts.append(f"satisfaction = '{satisfaction}'")
+        if service_method:
+            parts.append(f"service_method = '{service_method}'")
+        if customer_type:
+            parts.append(f"customer_type = '{customer_type}'")
+        if order_source:
+            parts.append(f"order_source = '{order_source}'")
+        return " AND ".join(parts) if parts else None
+
+    def search_feedback(
+        self,
+        query_text: str,
+        num_results: int = 25,
+        satisfaction: Optional[str] = None,
+        service_method: Optional[str] = None,
+        customer_type: Optional[str] = None,
+        order_source: Optional[str] = None,
+        extra_expr: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         """
-        Search customer feedback using vector similarity.
-        
-        Args:
-            query: Search query text
-            num_results: Number of results to return
-            satisfaction_filter: Optional filter by satisfaction level
-            
-        Returns:
-            List of search results [id, text, satisfaction, service_method, score]
+        Similarity search with optional filters. Returns list of dict rows using server-returned column names.
         """
+        idx = self._get_index()
+
+        # Compose expr filter
+        base_expr = self._build_expr(satisfaction, service_method, customer_type, order_source)
+        expr = f"({base_expr}) AND ({extra_expr})" if (base_expr and extra_expr) else (extra_expr or base_expr)
+        filters = {"expr": expr} if expr else None
+
+        params = {
+            "query_text": query_text,
+            "columns": self.search_columns,
+            "num_results": max(1, int(num_results)),
+        }
+        if filters:
+            params["filters"] = filters
+
         try:
-            index = self._get_index()
-            
-            # Build search parameters
-            search_params = {
-                "query_text": query,
-                "columns": self.search_columns,
-                "num_results": min(num_results, Config.MAX_NUM_RESULTS)
-            }
-            
-            # Add satisfaction filter if specified
-            if satisfaction_filter and satisfaction_filter in Config.SATISFACTION_LEVELS:
-                search_params["filters"] = {"satisfaction": satisfaction_filter}
-            
-            # Perform search
-            results = index.similarity_search(**search_params)
-            
-            # Extract and return data array
-            if results and 'result' in results and 'data_array' in results['result']:
-                return results['result']['data_array']
-            
-            return []
-            
+            res = idx.similarity_search(**params) or {}
+            result = res.get("result", {})
+            rows = result.get("data_array", []) or []
+            cols = result.get("columns", self.search_columns)
+
+            # Zip into dict rows (schema-safe)
+            out = [dict(zip(cols, r)) for r in rows]
+
+            # If a score column exists, keep it; otherwise drop silently
+            return out
         except Exception as e:
-            logger.error(f"Search failed for query '{query}': {str(e)}")
+            log.error("Vector search failed: %s", e, exc_info=True)
             return []
-    
-    def analyze_satisfaction_trends(self, topic: str, num_results: int = 5) -> Dict[str, Any]:
-        """
-        Analyze how different satisfaction levels discuss a topic.
-        
-        Args:
-            topic: Topic to analyze
-            num_results: Number of results per satisfaction level
-            
-        Returns:
-            Dictionary with satisfaction analysis results
-        """
-        try:
-            results = {}
-            total_found = 0
-            
-            for satisfaction_level in Config.SATISFACTION_LEVELS:
-                feedback = self.search_feedback(
-                    query=topic,
-                    num_results=num_results,
-                    satisfaction_filter=satisfaction_level
-                )
-                
-                # Format results for easier consumption
-                formatted_feedback = []
-                for result in feedback:
-                    formatted_feedback.append({
-                        "id": result[0],
-                        "text": result[1],
-                        "satisfaction": result[2],
-                        "service_method": result[3],
-                        "score": result[4] if len(result) > 4 else 0.0
-                    })
-                
-                results[satisfaction_level] = formatted_feedback
-                total_found += len(formatted_feedback)
-            
-            return {
-                "topic": topic,
-                "satisfaction_analysis": results,
-                "total_found": total_found
-            }
-            
-        except Exception as e:
-            logger.error(f"Satisfaction trend analysis failed for topic '{topic}': {str(e)}")
-            return {
-                "topic": topic,
-                "satisfaction_analysis": {},
-                "total_found": 0,
-                "error": str(e)
-            }
-    
+
+    # Convenience: older API that returns lists if your UI expects it
+    def search_feedback_as_lists(
+        self,
+        *args,
+        **kwargs,
+    ) -> List[List[Any]]:
+        dict_rows = self.search_feedback(*args, **kwargs)
+        if not dict_rows:
+            return []
+        cols = list(dict_rows[0].keys())
+        return [[row.get(c) for c in cols] for row in dict_rows]
+
     def get_search_statistics(self) -> Dict[str, Any]:
-        """Get basic statistics about the searchable data."""
-        try:
-            # Sample search to get basic info
-            sample_results = self.search_feedback("pizza", num_results=100)
-            
-            if sample_results:
-                satisfactions = [result[2] for result in sample_results]
-                service_methods = [result[3] for result in sample_results]
-                
-                return {
-                    "total_sample_size": len(sample_results),
-                    "satisfaction_distribution": {
-                        satisfaction: satisfactions.count(satisfaction)
-                        for satisfaction in set(satisfactions)
-                    },
-                    "service_method_distribution": {
-                        method: service_methods.count(method)
-                        for method in set(service_methods)
-                    }
-                }
-            
+        """Quick sample-based stats (best-effort)."""
+        sample = self.search_feedback("pizza", num_results=100)
+        if not sample:
             return {"error": "No data available"}
-            
-        except Exception as e:
-            logger.error(f"Failed to get search statistics: {str(e)}")
-            return {"error": str(e)}
+        def dist(key: str) -> Dict[str, int]:
+            vals = [r.get(key, "Unknown") for r in sample]
+            return {v: vals.count(v) for v in set(vals)}
+        return {
+            "total_sample_size": len(sample),
+            "satisfaction_distribution": dist("satisfaction"),
+            "service_method_distribution": dist("service_method"),
+        }
 
+
+# ---------------------- RAG helpers (optional) ---------------------- #
 class RAGPipeline:
-    """Manages the complete RAG (Retrieval-Augmented Generation) pipeline."""
-    
-    def __init__(self, vector_manager: VectorSearchManager):
-        """
-        Initialize the RAG pipeline.
-        
-        Args:
-            vector_manager: VectorSearchManager instance
-        """
-        self.vector_manager = vector_manager
-        self.prompt_template = Config.RAG_PROMPT_TEMPLATE
-    
-    def create_rag_prompt(self, question: str, contexts: List[str]) -> str:
-        """
-        Create a RAG prompt for the LLM.
-        
-        Args:
-            question: User's question
-            contexts: List of relevant context strings
-            
-        Returns:
-            Formatted RAG prompt
-        """
-        # Format contexts with numbers
-        context_text = "\n\n".join([
-            f"Context {i+1}: {ctx}" for i, ctx in enumerate(contexts)
-        ])
-        
-        return self.prompt_template.format(
-            context=context_text,
-            question=question
-        )
-    
-    def ask_question(self, question: str, num_contexts: int = 5, satisfaction_filter: Optional[str] = None) -> Dict[str, Any]:
-        """
-        Complete RAG pipeline: retrieve relevant contexts and prepare for generation.
-        
-        Args:
-            question: User's question about VOC data
-            num_contexts: Number of context chunks to retrieve
-            satisfaction_filter: Optional satisfaction level filter
-            
-        Returns:
-            Dictionary with question, contexts, metadata, and RAG prompt
-        """
-        try:
-            # Step 1: Retrieve relevant contexts
-            search_results = self.vector_manager.search_feedback(
-                query=question,
-                num_results=num_contexts,
-                satisfaction_filter=satisfaction_filter
+    """Construct prompts and package retrieval results for your LLM caller."""
+
+    def __init__(self, vsm: VectorSearchManager, prompt_template: Optional[str] = None):
+        self.vsm = vsm
+        if prompt_template:
+            self.template = prompt_template
+        elif AppConfig and hasattr(AppConfig, "RAG_PROMPT_TEMPLATE"):
+            self.template = AppConfig.RAG_PROMPT_TEMPLATE
+        else:
+            self.template = (
+                "You are a helpful assistant analyzing customer feedback.\n\n"
+                "Context:\n{context}\n\nQuestion: {question}\n\n"
+                "Instructions:\n- Answer only from the context.\n- Be concise and actionable.\n\nAnswer:"
             )
-            
-            # Step 2: Extract contexts and metadata
-            contexts = []
-            metadata = []
-            
-            for result in search_results:
-                # result format: [id, text, satisfaction, service_method, score]
-                contexts.append(result[1])  # text
-                metadata.append({
-                    "id": result[0],
-                    "satisfaction": result[2],
-                    "service_method": result[3],
-                    "score": result[4] if len(result) > 4 else 0.0
-                })
-            
-            # Step 3: Create RAG prompt
-            rag_prompt = self.create_rag_prompt(question, contexts)
-            
-            # Step 4: Return structured response
-            return {
-                "question": question,
-                "contexts_found": len(contexts),
-                "contexts": contexts,
-                "metadata": metadata,
-                "rag_prompt": rag_prompt,
-                "status": "success"
-            }
-            
-        except Exception as e:
-            logger.error(f"RAG pipeline failed for question '{question}': {str(e)}")
-            return {
-                "question": question,
-                "error": str(e),
-                "status": "error"
-            }
-    
-    def generate_business_insights(self, topic: str, num_contexts: int = 10) -> Dict[str, Any]:
-        """
-        Generate comprehensive business insights for a specific topic.
-        
-        Args:
-            topic: Business topic to analyze
-            num_contexts: Number of contexts to analyze
-            
-        Returns:
-            Structured business insights
-        """
-        try:
-            # Get satisfaction trend analysis
-            trend_analysis = self.vector_manager.analyze_satisfaction_trends(topic, num_contexts//len(Config.SATISFACTION_LEVELS))
-            
-            # Generate summary insights for each satisfaction level
-            insights = {}
-            for satisfaction_level in Config.SATISFACTION_LEVELS:
-                comments = trend_analysis["satisfaction_analysis"].get(satisfaction_level, [])
-                
-                if comments:
-                    # Extract key themes (simplified keyword analysis)
-                    all_text = " ".join([comment["text"] for comment in comments])
-                    
-                    insights[satisfaction_level] = {
-                        "comment_count": len(comments),
-                        "sample_comments": [comment["text"][:100] + "..." for comment in comments[:3]],
-                        "avg_relevance_score": sum(comment["score"] for comment in comments) / len(comments),
-                        "service_method_breakdown": self._analyze_service_methods(comments)
-                    }
-            
-            return {
-                "topic": topic,
-                "insights": insights,
-                "total_comments_analyzed": trend_analysis["total_found"],
-                "status": "success"
-            }
-            
-        except Exception as e:
-            logger.error(f"Business insights generation failed for topic '{topic}': {str(e)}")
-            return {
-                "topic": topic,
-                "error": str(e),
-                "status": "error"
-            }
-    
-    def _analyze_service_methods(self, comments: List[Dict]) -> Dict[str, int]:
-        """Analyze service method distribution in comments."""
-        service_methods = [comment.get("service_method", "Unknown") for comment in comments]
-        return {method: service_methods.count(method) for method in set(service_methods)}
 
-class DataValidator:
-    """Validates data and search results."""
-    
     @staticmethod
-    def validate_search_query(query: str) -> bool:
-        """Validate search query."""
-        return bool(query and query.strip() and len(query.strip()) >= 2)
-    
-    @staticmethod
-    def validate_search_results(results: List) -> bool:
-        """Validate search results format."""
-        if not results:
-            return True  # Empty results are valid
-        
-        # Check if first result has expected structure
-        if results and len(results[0]) >= 4:
-            return True
-        
-        return False
-    
-    @staticmethod
-    def sanitize_query(query: str) -> str:
-        """Sanitize user input query."""
-        if not query:
-            return ""
-        
-        # Basic sanitization
-        sanitized = query.strip()
-        # Remove any potentially harmful characters
-        sanitized = ''.join(char for char in sanitized if char.isprintable())
-        
-        return sanitized[:200]  # Limit length
+    def _join_contexts(contexts: List[str]) -> str:
+        return "\n\n".join([f"Context {i+1}: {c}" for i, c in enumerate(contexts)])
 
-# Utility functions
-def format_satisfaction_distribution(metadata: List[Dict]) -> Dict[str, int]:
-    """Format satisfaction distribution from metadata."""
-    satisfactions = [meta.get("satisfaction", "Unknown") for meta in metadata]
-    return {satisfaction: satisfactions.count(satisfaction) for satisfaction in set(satisfactions)}
+    def build_prompt(self, question: str, contexts: List[str]) -> str:
+        return self.template.format(context=self._join_contexts(contexts), question=question)
 
-def format_service_method_distribution(metadata: List[Dict]) -> Dict[str, int]:
-    """Format service method distribution from metadata."""
-    service_methods = [meta.get("service_method", "Unknown") for meta in metadata]
-    return {method: service_methods.count(method) for method in set(service_methods)}
-
-def truncate_text(text: str, max_length: int = 100) -> str:
-    """Truncate text to specified length."""
-    if len(text) <= max_length:
-        return text
-    return text[:max_length-3] + "..."
+    def ask(
+        self,
+        question: str,
+        num_contexts: int = 5,
+        satisfaction: Optional[str] = None,
+        service_method: Optional[str] = None,
+        customer_type: Optional[str] = None,
+        order_source: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        rows = self.vsm.search_feedback(
+            query_text=question,
+            num_results=num_contexts,
+            satisfaction=satisfaction,
+            service_method=service_method,
+            customer_type=customer_type,
+            order_source=order_source,
+        )
+        contexts = [r.get("text", "") for r in rows]
+        meta = [
+            {
+                "id": r.get("id"),
+                "satisfaction": r.get("satisfaction"),
+                "service_method": r.get("service_method"),
+                "score": r.get("score", r.get("_score", None)),
+            }
+            for r in rows
+        ]
+        return {
+            "question": question,
+            "contexts_found": len(contexts),
+            "contexts": contexts,
+            "metadata": meta,
+            "rag_prompt": self.build_prompt(question, contexts),
+            "status": "success",
+        }
