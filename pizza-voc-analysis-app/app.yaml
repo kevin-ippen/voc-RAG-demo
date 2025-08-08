@@ -31,8 +31,5 @@ env:
   - name: LLM_ENDPOINT
     value: databricks-gpt-oss-20b
 
-  - name: SQL_WAREHOUSE_HTTP_PATH
-    value: /sql/1.0/warehouses/<your-real-warehouse-id>
-
   - name: DATABRICKS_AUTH_TYPE
     value: oauth-m2m
