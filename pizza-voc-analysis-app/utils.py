@@ -130,13 +130,14 @@ class VectorSearchManager:
             hits = getattr(res, "result", None) or getattr(res, "data", None) or []
             return self._normalize_hits(hits)
 
-        # ---------- REST fallback ----------
-        # Endpoint (stable across versions):
+        # ---------- REST fallback (compatible with older backends) ----------
         # POST /api/2.0/vector-search/indexes/{index_fqn}/query
+        # Required: 'query': {'text': ...}, 'num_results', 'endpoint_name', and **'columns'**
         body: Dict[str, Any] = {
-            "query": {"query_text": query_text},
+            "query": {"text": query_text},            # <- 'text' not 'query_text'
             "num_results": top_k,
             "endpoint_name": self.endpoint_name,
+            "columns": ["text", "metadata"],          # <- explicitly ask for the common fields
         }
         if meta_filters:
             body["filters"] = {"metadata": meta_filters}
@@ -154,7 +155,6 @@ class VectorSearchManager:
                 f"{detail}; REST error: {e}"
             )
 
-        # Older responses usually return {"data": [ ... ]} or {"result": [...]}
         hits = raw.get("result") or raw.get("data") or []
         return self._normalize_hits(hits)
 
