@@ -75,6 +75,89 @@ class VectorSearchManager:
 
         self._client = self._build_client_or_none()
 
+    def _extract_hits(self, raw: dict) -> list:
+        """
+        Handle older VS response shapes:
+        - {"columns": ["text", ...], "data": [ ["a", ...], ["b", ...] ]}
+        - {"data": [{"text": "...", ...}, ...]}
+        - {"result": [{"text": "...", ...}, ...]}
+        - ["a", "b", ...]  (plain strings)
+        """
+        if not isinstance(raw, dict):
+            # Some very old endpoints return just a list
+            return raw if isinstance(raw, list) else []
+
+        # Columnar (columns + data)
+        cols = raw.get("columns")
+        data = raw.get("data")
+        if isinstance(cols, list) and isinstance(data, list):
+            out = []
+            for row in data:
+                if isinstance(row, list):
+                    out.append({cols[i]: row[i] for i in range(min(len(cols), len(row)))})
+                elif isinstance(row, dict):
+                    out.append(row)
+                elif isinstance(row, str):
+                    out.append({"text": row})
+            return out
+
+        # Dict lists under known keys
+        for key in ("result", "data", "hits", "items"):
+            val = raw.get(key)
+            if isinstance(val, list):
+                return val
+
+        # Plain list of strings?
+        if isinstance(raw, list):
+            return raw
+
+        return []
+
+    def _normalize_hits(self, hits: list) -> list[dict]:
+        """
+        Accepts strings, dicts, or mixed lists and produces a list of dicts with at least {'text', 'score?'}.
+        """
+        out = []
+        for h in hits:
+            if isinstance(h, str):
+                out.append({"text": h, "score": None})
+                continue
+            if not isinstance(h, dict):
+                # Best effort
+                out.append({"text": str(h), "score": None})
+                continue
+
+            # Common shapes
+            text = (
+                h.get("text")
+                or h.get("chunk")
+                or (h.get("document") or {}).get("text")
+                or h.get("value")
+            )
+            score = h.get("score") or h.get("similarity") or h.get("distance")
+            meta = (
+                h.get("metadata")
+                or (h.get("document") or {}).get("metadata")
+                or {}
+            )
+
+            row = {"text": text, "score": score}
+            if isinstance(meta, dict):
+                row.update(meta)
+
+            # Copy a few likely fields if present
+            for k in ("id", "source", "document_id"):
+                if k in h and k not in row:
+                    row[k] = h[k]
+
+            # If text is still missing but there’s a single key, pick it
+            if row.get("text") is None and len(h) == 1:
+                only_key = next(iter(h))
+                row["text"] = h[only_key]
+
+            out.append(row)
+        return out
+
     def _build_client_or_none(self):
         """Try many signatures; return client or None (REST fallback)."""
         if VectorSearchClient is None:
@@ -132,11 +215,16 @@ class VectorSearchManager:
 
         # ---------- REST fallback for older backends ----------
         # Older API expects top-level 'query_text' or 'query_vector', and a 'columns' array.
+        wanted = ["text", "metadata", "id", "source", "document_id"]
+        request_cols = [c for c in wanted if c in getattr(self, "_available_columns", {"text"})]
+        if not request_cols:
+            request_cols = ["text"]
+
         body: Dict[str, Any] = {
-            "query_text": query_text,          # <- top-level, not nested
+            "query_text": query_text,       # top-level for old API
             "num_results": top_k,
             "endpoint_name": self.endpoint_name,
-            "columns": ["text"],   # adjust if your index uses different names
+            "columns": request_cols,        # ask only for columns that exist
             "return_scores": True,
         }
         if meta_filters:
@@ -149,10 +237,9 @@ class VectorSearchManager:
                 body=body,
             )
         except Exception as e:
-            # Don’t confuse users with typed-client ctor noise; show the actual REST error
             raise RuntimeError(f"Vector search failed (REST): {e}")
 
-        hits = raw.get("result") or raw.get("data") or []
+        hits = self._extract_hits(raw)
         return self._normalize_hits(hits)
 
     def describe_index(self) -> Dict[str, Any]:
