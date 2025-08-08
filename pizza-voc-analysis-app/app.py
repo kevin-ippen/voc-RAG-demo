@@ -26,26 +26,37 @@ from databricks.vector_search.client import VectorSearchClient
 from databricks.sdk.core import Config as SDKConfig
 from utils import VectorSearchManager
 
-vsm = VectorSearchManager(ws=WS)  # <- pass the workspace explicitly
 
-def make_ws_for_app() -> WorkspaceClient:
-    import os
+def _make_ws_for_app() -> WorkspaceClient:
     host = os.getenv("DATABRICKS_HOST")
     cid  = os.getenv("DATABRICKS_CLIENT_ID")
     csec = os.getenv("DATABRICKS_CLIENT_SECRET")
-    if not (host and cid and csec):
-        raise RuntimeError("Missing HOST/CLIENT_ID/CLIENT_SECRET")
-
+    if not host or not host.startswith("http"):
+        raise RuntimeError("DATABRICKS_HOST missing/invalid (must include https://)")
+    if not (cid and csec):
+        raise RuntimeError("Service principal creds not found in env (CLIENT_ID/SECRET).")
     cfg = SDKConfig(
-        host=host,               # MUST include https://
-        auth_type="oauth-m2m",   # force SP path
+        host=host,
+        auth_type="oauth-m2m",
         client_id=cid,
         client_secret=csec,
-        # AWS: no token endpoint needed
     )
     return WorkspaceClient(config=cfg)
 
-WS = make_ws_for_app()
+@st.cache_resource(show_spinner=True)
+def get_workspace() -> WorkspaceClient:
+    return _make_ws_for_app()
+
+WS = get_workspace()
+with st.expander("Auth path (runtime)"):
+    try:
+        me = WS.current_user.me()
+        st.write({"workspace_user": me.user_name})
+        st.success("WorkspaceClient auth OK (oauth-m2m)")
+    except Exception as e:
+        st.error(f"WorkspaceClient failed: {e}")
+
+
 
 # ------------- Environment / Config -------------
 DATABRICKS_HOST = os.getenv("DATABRICKS_HOST")  # required for OBO and SDKs
