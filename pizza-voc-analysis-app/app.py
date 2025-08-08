@@ -24,6 +24,9 @@ from databricks.sdk import WorkspaceClient
 from mlflow.deployments import get_deploy_client
 from databricks.vector_search.client import VectorSearchClient
 from databricks.sdk.core import Config as SDKConfig
+from utils import VectorSearchManager
+
+vsm = VectorSearchManager(ws=WS)  # <- pass the workspace explicitly
 
 def make_ws_for_app() -> WorkspaceClient:
     import os
