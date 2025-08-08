@@ -10,7 +10,7 @@ class Config:
     VECTOR_INDEX_NAME = "users.kevin_ippen.voc_chunks_index"
     
     # Model Serving Configuration
-    LLM_ENDPOINT_NAME = "databricks-llama-2-70b-chat"  # Update with your actual LLM endpoint
+    LLM_ENDPOINT_NAME = "databricks-gpt-oss-20b"  # Update with your actual LLM endpoint
     # Alternative endpoints you might have:
     # LLM_ENDPOINT_NAME = "databricks-dbrx-instruct"
     # LLM_ENDPOINT_NAME = "your-custom-llm-endpoint"
