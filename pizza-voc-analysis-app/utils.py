@@ -49,205 +49,74 @@ def _make_ws() -> WorkspaceClient:
 
 
 class VectorSearchManager:
-    """
-    Wrapper that tolerates multiple VectorSearchClient versions.
-    If the import/constructor fails, uses REST fallback through WorkspaceClient.api_client.
-    """
-
     def __init__(self, ws: WorkspaceClient):
         self.ws = ws
-        self.endpoint_name = (
-            os.getenv("VECTOR_SEARCH_ENDPOINT")
-            or os.getenv("VECTORSEARCH_ENDPOINT")
-        )
-        self.index_fqn = (
-            os.getenv("VECTOR_INDEX_NAME")
-            or os.getenv("VECTORSEARCH_INDEX")
-        )
-
+        self.endpoint_name = os.getenv("VECTOR_SEARCH_ENDPOINT") or os.getenv("VECTORSEARCH_ENDPOINT")
+        self.index_fqn = os.getenv("VECTOR_INDEX_NAME") or os.getenv("VECTORSEARCH_INDEX")
         if not self.endpoint_name:
             raise ValueError("VECTOR_SEARCH_ENDPOINT is not set.")
         if not self.index_fqn or self.index_fqn.count(".") != 2:
-            raise ValueError(
-                "VECTOR_INDEX_NAME must be fully qualified as catalog.schema.index "
-                "(e.g., main.vs_schema.voc_chunks_index)."
-            )
+            raise ValueError("VECTOR_INDEX_NAME must be fully qualified as catalog.schema.index")
 
         self._client = self._build_client_or_none()
-
-    def _extract_hits(self, raw: dict) -> list:
-        """
-        Handle older VS response shapes:
-        - {"columns": ["text", ...], "data": [ ["a", ...], ["b", ...] ]}
-        - {"data": [{"text": "...", ...}, ...]}
-        - {"result": [{"text": "...", ...}, ...]}
-        - ["a", "b", ...]  (plain strings)
-        """
-        if not isinstance(raw, dict):
-            # Some very old endpoints return just a list
-            return raw if isinstance(raw, list) else []
-
-        # Columnar (columns + data)
-        cols = raw.get("columns")
-        data = raw.get("data")
-        if isinstance(cols, list) and isinstance(data, list):
-            out = []
-            for row in data:
-                if isinstance(row, list):
-                    out.append({cols[i]: row[i] for i in range(min(len(cols), len(row)))})
-                elif isinstance(row, dict):
-                    out.append(row)
-                elif isinstance(row, str):
-                    out.append({"text": row})
-            return out
-
-        # Dict lists under known keys
-        for key in ("result", "data", "hits", "items"):
-            val = raw.get(key)
-            if isinstance(val, list):
-                return val
-
-        # Plain list of strings?
-        if isinstance(raw, list):
-            return raw
-
-        return []
-
-    def _normalize_hits(self, hits: list) -> list[dict]:
-        """
-        Accepts strings, dicts, or mixed lists and produces a list of dicts with at least {'text', 'score?'}.
-        """
-        out = []
-        for h in hits:
-            if isinstance(h, str):
-                out.append({"text": h, "score": None})
-                continue
-            if not isinstance(h, dict):
-                # Best effort
-                out.append({"text": str(h), "score": None})
-                continue
-
-            # Common shapes
-            text = (
-                h.get("text")
-                or h.get("chunk")
-                or (h.get("document") or {}).get("text")
-                or h.get("value")
-            )
-            score = h.get("score") or h.get("similarity") or h.get("distance")
-            meta = (
-                h.get("metadata")
-                or (h.get("document") or {}).get("metadata")
-                or {}
-            )
-
-            row = {"text": text, "score": score}
-            if isinstance(meta, dict):
-                row.update(meta)
-
-            # Copy a few likely fields if present
-            for k in ("id", "source", "document_id"):
-                if k in h and k not in row:
-                    row[k] = h[k]
-
-            # If text is still missing but there’s a single key, pick it
-            if row.get("text") is None and len(h) == 1:
-                only_key = next(iter(h))
-                row["text"] = h[only_key]
-
-            out.append(row)
-        return out
+        self._available_columns = self._discover_columns()
+        self._text_col = self._pick_text_col(self._available_columns)  # <- choose the right text column
 
     def _build_client_or_none(self):
-        """Try many signatures; return client or None (REST fallback)."""
         if VectorSearchClient is None:
             return None
-
         attempts = [
-            {"workspace_client": self.ws},                 # newer
-            {"workspace": self.ws},                        # some mid versions logged 'workspace' (rare)
-            {"api_client": self.ws.api_client},            # older accepted ApiClient
-            {"config": self.ws.config},                    # some accepted Config directly
-            {"workspace_url": self.ws.config.host, "personal_access_token": self.ws.config.token},  # very old
+            {"workspace_client": self.ws},
+            {"workspace": self.ws},
+            {"api_client": self.ws.api_client},
+            {"config": self.ws.config},
+            {"workspace_url": self.ws.config.host, "personal_access_token": self.ws.config.token},
         ]
-
         last_err = None
         for kwargs in attempts:
             try:
                 return VectorSearchClient(**kwargs)
-            except TypeError as e:
-                last_err = e
-                continue
             except Exception as e:
                 last_err = e
                 continue
-
-        # Could not construct a typed client — we'll REST-fallback in search()
-        # Keep the last error for debug
         self._ctor_error = last_err
         return None
 
-    def search(
-        self,
-        query_text: str,
-        top_k: int = 10,
-        **filters: Optional[str],
-    ) -> List[Dict[str, Any]]:
+    def _discover_columns(self) -> set:
+        try:
+            desc = self.ws.api_client.do("GET", f"/api/2.0/vector-search/indexes/{self.index_fqn}")
+            cols = desc.get("columns") or []
+            names = set()
+            for c in cols:
+                if isinstance(c, str):
+                    names.add(c)
+                elif isinstance(c, dict) and "name" in c:
+                    names.add(c["name"])
+            return names or {"text"}  # fallback
+        except Exception:
+            return {"text"}
+
+    @staticmethod
+    def _pick_text_col(names: set) -> str:
+        # order of preference for common text fields
+        prefs = ["text", "chunk", "content", "body", "page_text", "document_text", "value"]
+        for p in prefs:
+            if p in names:
+                return p
+        # heuristic: first column containing 'text' or 'content'
+        for n in names:
+            ln = n.lower()
+            if "text" in ln or "content" in ln or "chunk" in ln:
+                return n
+        # last resort: arbitrary first name
+        return next(iter(names))
+
+    def search(self, query_text: str, top_k: int = 10, **filters: Optional[str]) -> List[Dict[str, Any]]:
         if not query_text:
             return []
 
+        # TEMP: ignore filters for the sanity pass; we’ll re-enable after we see results
         meta_filters = {k: v for k, v in filters.items() if v}
-
-        if self._client is not None:
-            # Use typed client, handling num_results/top_k rename
-            kwargs = {
-                "index_name": self.index_fqn,
-                "endpoint_name": self.endpoint_name,
-                "query_text": query_text,
-            }
-            try:
-                res = self._client.indexes.query_index(num_results=top_k, filters=meta_filters, **kwargs)
-            except TypeError:
-                res = self._client.indexes.query_index(top_k=top_k, filters=meta_filters, **kwargs)
-
-            hits = getattr(res, "result", None) or getattr(res, "data", None) or []
-            return self._normalize_hits(hits)
-
-        # ---------- REST fallback for older backends ----------
-        # Older API expects top-level 'query_text' or 'query_vector', and a 'columns' array.
-        wanted = ["text", "metadata", "id", "source", "document_id"]
-        request_cols = [c for c in wanted if c in getattr(self, "_available_columns", {"text"})]
-        if not request_cols:
-            request_cols = ["text"]
-
-        body: Dict[str, Any] = {
-            "query_text": query_text,       # top-level for old API
-            "num_results": top_k,
-            "endpoint_name": self.endpoint_name,
-            "columns": request_cols,        # ask only for columns that exist
-            "return_scores": True,
-        }
-        if meta_filters:
-            body["filters"] = {"metadata": meta_filters}
-
-        try:
-            raw = self.ws.api_client.do(
-                "POST",
-                f"/api/2.0/vector-search/indexes/{self.index_fqn}/query",
-                body=body,
-            )
-        except Exception as e:
-            raise RuntimeError(f"Vector search failed (REST): {e}")
-
-        hits = self._extract_hits(raw)
-        return self._normalize_hits(hits)
-
-    def describe_index(self) -> Dict[str, Any]:
-        """Fetch index metadata to see available columns/fields."""
-        return self.ws.api_client.do(
-            "GET", f"/api/2.0/vector-search/indexes/{self.index_fqn}"
-        )
-
 
     @staticmethod
     def _normalize_hits(hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
