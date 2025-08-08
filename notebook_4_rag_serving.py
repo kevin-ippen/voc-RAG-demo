@@ -11,6 +11,12 @@
 
 # COMMAND ----------
 
+# Install the required package
+%pip install databricks-vectorsearch
+dbutils.library.restartPython()
+
+# COMMAND ----------
+
 import pandas as pd
 import json
 import time
@@ -23,8 +29,8 @@ from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.serving import EndpointCoreConfigInput, ServedEntityInput
 
 # Configuration
-CATALOG_NAME = "pizza_voc"
-SCHEMA_NAME = "customer_feedback"
+CATALOG_NAME = "users"
+SCHEMA_NAME = "kevin_ippen"
 
 # Vector Search configuration - CORRECTED
 VECTOR_SEARCH_ENDPOINT = "dbdemos_vs_endpoint"
@@ -32,7 +38,7 @@ VECTOR_INDEX_NAME = "users.kevin_ippen.voc_chunks_index"
 
 # Model Serving configuration
 RAG_ENDPOINT_NAME = "pizza-voc-rag-assistant"
-LLM_MODEL = "databricks-llama-2-70b-chat"  # Using Databricks hosted Llama
+LLM_MODEL = "databricks-gpt-oss-20b"  # Using Databricks hosted GPT OSS 20B
 
 # Initialize clients
 spark = SparkSession.builder.getOrCreate()

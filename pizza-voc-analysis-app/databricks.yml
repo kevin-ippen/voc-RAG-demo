@@ -1,0 +1,102 @@
+# Databricks App Configuration
+# This file defines the configuration for deploying the Pizza VOC Analysis app
+
+bundle:
+  name: pizza-voc-analysis-app
+
+workspace:
+  host: ${workspace.host}
+
+# App configuration
+apps:
+  pizza_voc_app:
+    name: pizza-voc-analysis
+    description: "AI-powered pizza company customer feedback analysis using RAG and vector search"
+    
+    # App source configuration
+    source_code_path: ./
+    
+    # App runtime configuration
+    config:
+      command:
+        - "streamlit"
+        - "run" 
+        - "app.py"
+        - "--server.port=8501"
+        - "--server.address=0.0.0.0"
+        - "--logger.level=info"
+        - "--server.enableCORS=false"
+        - "--server.enableXsrfProtection=false"
+    
+    # Resource configuration
+    compute:
+      size: SMALL  # Options: SMALL, MEDIUM, LARGE
+      scale_to_zero: true
+    
+    # Environment variables (if needed)
+    env:
+      - name: STREAMLIT_SERVER_PORT
+        value: "8501"
+      - name: STREAMLIT_SERVER_ADDRESS  
+        value: "0.0.0.0"
+      - name: STREAMLIT_LOGGER_LEVEL
+        value: "info"
+    
+    # App metadata
+    tags:
+      - key: "team"
+        value: "data-science"
+      - key: "project"
+        value: "customer-feedback-analysis"
+      - key: "environment"
+        value: "production"
+
+# Permissions (optional - adjust based on your needs)
+permissions:
+  - level: CAN_MANAGE
+    group_name: "data-science-team"
+  - level: CAN_USE
+    group_name: "business-users"
+
+# Resources that the app depends on
+resources:
+  # Vector search endpoint (reference existing)
+  vector_search_endpoints:
+    dbdemos_vs_endpoint:
+      name: "dbdemos_vs_endpoint"
+      endpoint_type: "STANDARD"
+
+# Variables for different environments
+variables:
+  development:
+    vector_search_endpoint: "dbdemos_vs_endpoint"
+    vector_index_name: "users.kevin_ippen.voc_chunks_index"
+    
+  staging:
+    vector_search_endpoint: "dbdemos_vs_endpoint"
+    vector_index_name: "users.kevin_ippen.voc_chunks_index"
+    
+  production:
+    vector_search_endpoint: "dbdemos_vs_endpoint" 
+    vector_index_name: "users.kevin_ippen.voc_chunks_index"
+
+# Target configuration for different environments
+targets:
+  development:
+    mode: development
+    workspace:
+      root_path: /Workspace/Users/${workspace.current_user.userName}/pizza-voc-app-dev
+  
+  staging:  
+    mode: development
+    workspace:
+      root_path: /Workspace/Users/${workspace.current_user.userName}/pizza-voc-app-staging
+      
+  production:
+    mode: production
+    workspace:
+      root_path: /Workspace/Shared/pizza-voc-app-prod
+    
+    # Production-specific configurations
+    run_as:
+      service_principal_name: ${var.service_principal_name}
