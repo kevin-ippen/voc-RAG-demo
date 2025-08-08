@@ -26,7 +26,7 @@ env:
   - name: VECTOR_SEARCH_ENDPOINT
     value: dbdemos_vs_endpoint
   - name: VECTOR_INDEX_NAME
-    value: users.kevin_ippen.voc_pizza_chunks_for_index   # <= fix if different
+    value: users.kevin_ippen.voc_chunks_index   # <= fix if different
 
   - name: LLM_ENDPOINT
     value: databricks-gpt-oss-20b
