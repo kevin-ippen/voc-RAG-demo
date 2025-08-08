@@ -1,134 +1,27 @@
-# Databricks App Configuration
-# This file defines the configuration for deploying the Pizza VOC Analysis app
+name: pizza-voc-analysis-app
+description: "AI-powered pizza company customer feedback analysis"
 
-bundle:
-  name: pizza-voc-analysis-app
+command:
+  - streamlit
+  - run
+  - app.py
+  - --server.port=8000
+  - --server.address=0.0.0.0
+  - --server.headless=true
+  - --logger.level=info
+  - --server.enableCORS=false
+  - --server.enableXsrfProtection=false
 
-workspace:
-  host: ${workspace.host}
+# Optional runtime resources for the container (not cluster sizing)
+# You can remove this block if you don't need explicit limits.
+# resources:
+#   memory: "2Gi"
+#   cpu: "1000m"
 
-# App configuration
-apps:
-  pizza_voc_app:
-    name: pizza-voc-analysis
-    description: "AI-powered pizza company customer feedback analysis using RAG and vector search with model serving"
-    
-    # App source configuration
-    source_code_path: ./
-    
-    # App runtime configuration
-    config:
-      command:
-        - "streamlit"
-        - "run" 
-        - "app.py"
-        - "--server.port=8000"
-        - "--server.address=0.0.0.0"
-        - "--server.headless=true"
-        - "--logger.level=info"
-        - "--server.enableCORS=false"
-        - "--server.enableXsrfProtection=false"
-    
-    # Resource configuration
-    compute:
-      size: SMALL  # Options: SMALL, MEDIUM, LARGE
-      scale_to_zero: true
-    
-    # Environment variables (if needed)
-    env:
-      - name: STREAMLIT_SERVER_PORT
-        value: "8501"
-      - name: STREAMLIT_SERVER_ADDRESS  
-        value: "0.0.0.0"
-      - name: STREAMLIT_LOGGER_LEVEL
-        value: "info"
-    
-    # App metadata
-    tags:
-      - key: "team"
-        value: "data-science"
-      - key: "project"
-        value: "customer-feedback-analysis"
-      - key: "environment"
-        value: "production"
-
-# Permissions (adjust based on your needs)
-permissions:
-  - level: CAN_MANAGE
-    group_name: "data-science-team"
-  - level: CAN_USE
-    group_name: "business-users"
-
-# Resources that the app depends on
-resources:
-  # Vector search endpoint (reference existing)
-  vector_search_endpoints:
-    dbdemos_vs_endpoint:
-      name: "dbdemos_vs_endpoint"
-      endpoint_type: "STANDARD"
-
-  # Model serving endpoints (reference existing foundation models)
-  model_serving_endpoints:
-    llm_endpoint:
-      name: "databricks-llama-2-70b-chat"
-      # Additional model serving endpoints you might use:
-      # name: "databricks-dbrx-instruct"
-      # name: "databricks-mixtral-8x7b-instruct"
-      # name: "your-custom-llm-endpoint"
-
-# Variables for different environments
-variables:
-  development:
-    vector_search_endpoint: "dbdemos_vs_endpoint"
-    vector_index_name: "users.kevin_ippen.voc_chunks_index"
-    llm_endpoint: "databricks-llama-2-70b-chat"
-    
-  staging:
-    vector_search_endpoint: "dbdemos_vs_endpoint"
-    vector_index_name: "users.kevin_ippen.voc_chunks_index"
-    llm_endpoint: "databricks-llama-2-70b-chat"
-    
-  production:
-    vector_search_endpoint: "dbdemos_vs_endpoint" 
-    vector_index_name: "users.kevin_ippen.voc_chunks_index"
-    llm_endpoint: "databricks-llama-2-70b-chat"
-
-# Target configuration for different environments
-targets:
-  development:
-    mode: development
-    workspace:
-      root_path: /Workspace/Users/${workspace.current_user.userName}/pizza-voc-app-dev
-  
-  staging:  
-    mode: development
-    workspace:
-      root_path: /Workspace/Users/${workspace.current_user.userName}/pizza-voc-app-staging
-      
-  production:
-    mode: production
-    workspace:
-      root_path: /Workspace/Shared/pizza-voc-app-prod
-    
-    # Production-specific configurations
-    run_as:
-      service_principal_name: ${var.service_principal_name}
-
-# Required permissions for the service principal
-# Note: These need to be granted manually in the Databricks UI
-required_permissions:
-  unity_catalog:
-    - catalog: "pizza_voc"
-      privilege: "USE CATALOG"
-    - schema: "pizza_voc.customer_feedback" 
-      privilege: "USE SCHEMA"
-    - table: "pizza_voc.customer_feedback.voc_chunks_index"
-      privilege: "SELECT"
-  
-  vector_search:
-    - endpoint: "dbdemos_vs_endpoint"
-      privilege: "CAN_QUERY_ENDPOINT"
-  
-  model_serving:
-    - endpoint: "databricks-llama-2-70b-chat"
-      privilege: "CAN_QUERY"
+env:
+  - name: STREAMLIT_SERVER_PORT
+    value: "8000"
+  - name: STREAMLIT_SERVER_ADDRESS
+    value: "0.0.0.0"
+  - name: STREAMLIT_LOGGER_LEVEL
+    value: "info"
