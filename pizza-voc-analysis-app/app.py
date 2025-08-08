@@ -1,5 +1,5 @@
 # app.py
-import os
+# import os
 import json
 import logging
 from typing import Optional, List, Dict
@@ -8,12 +8,13 @@ import streamlit as st
 import pandas as pd
 
 with st.expander("Auth env check"):
+    import os
     st.write({
         "HOST set": bool(os.getenv("DATABRICKS_HOST")),
         "CLIENT_ID set": bool(os.getenv("DATABRICKS_CLIENT_ID")),
         "CLIENT_SECRET set": bool(os.getenv("DATABRICKS_CLIENT_SECRET")),
         "TOKEN_ENDPOINT set": bool(os.getenv("DATABRICKS_OAUTH_TOKEN_ENDPOINT")),
-        "TOKEN set (PAT)": bool(os.getenv("DATABRICKS_TOKEN")),
+        "PAT set": bool(os.getenv("DATABRICKS_TOKEN")),
         "AUTH_TYPE": os.getenv("DATABRICKS_AUTH_TYPE"),
     })
 
@@ -23,16 +24,6 @@ from mlflow.deployments import get_deploy_client
 from databricks.vector_search.client import VectorSearchClient
 from databricks import sql
 from databricks.sdk.core import Config
-
-# ------------- Streamlit setup -------------
-st.set_page_config(
-    page_title="Pizza VOC Explorer",
-    layout="wide",
-    page_icon="🍕",
-)
-
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("pizza-voc-app")
 
 # ------------- Environment / Config -------------
 DATABRICKS_HOST = os.getenv("DATABRICKS_HOST")  # required for OBO and SDKs
