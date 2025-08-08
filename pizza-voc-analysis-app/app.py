@@ -74,15 +74,17 @@ WS = get_workspace()
 
 # ------------- Vector Search helper -------------
 class VectorSearchManager:
-    def __init__(self, ws: WorkspaceClient, endpoint_name: str, index_name: str, columns: List[str]):
-        if not endpoint_name:
-            raise ValueError("VECTOR_SEARCH_ENDPOINT is required.")
-        if not index_name or "." not in index_name:
-            raise ValueError("VECTOR_INDEX_NAME must be a full path (catalog.schema.index).")
-        self.client = VectorSearchClient(workspace=ws, disable_notice=True)
+    def __init__(self, ws=None, endpoint_name=None, index_name=None, columns=None):
+        # Try new-style (supports workspace=) then fall back to legacy constructor
+        try:
+            self.client = VectorSearchClient(workspace=ws, disable_notice=True)  # newer SDKs
+        except TypeError:
+            # Older SDK: relies on env vars (DATABRICKS_HOST, DATABRICKS_AUTH_TYPE, CLIENT_ID/SECRET or TOKEN)
+            self.client = VectorSearchClient(disable_notice=True)
+
         self.endpoint = endpoint_name
         self.index = index_name
-        self.columns = columns
+        self.columns = columns or []
         self._handle = None
 
     def _get_index(self):
