@@ -13,21 +13,36 @@ command:
   - --server.enableXsrfProtection=false
 
 env:
+  # Streamlit basics
   - name: STREAMLIT_SERVER_PORT
     value: "8000"
-  - name: STREAMLIT_SERVER_ADDRESS
-    value: "0.0.0.0"
-  - name: STREAMLIT_LOGGER_LEVEL
+  - name: STREAMLIT_SERVER_HEADLESS
+    value: "true"
+  - name: STREAMLIT_LOG_LEVEL
     value: "info"
 
+  # Databricks workspace
   - name: DATABRICKS_HOST
     value: https://e2-demo-field-eng.cloud.databricks.com
 
+  # ---- Choose ONE auth path ----
+  # (A) Service Principal auth
+  - name: DATABRICKS_AUTH_TYPE
+    value: oauth-m2m
+  # ⚠️ Set these in the App UI as environment variables (don’t hardcode here):
+  # - DATABRICKS_CLIENT_ID
+  # - DATABRICKS_CLIENT_SECRET
+
+  # (B) OR Personal Access Token (comment out the oauth-m2m var above if you use PAT)
+  # - name: DATABRICKS_TOKEN
+  #   value: ***SET_IN_UI_NOT_HERE***
+
+  # Vector Search config (must exist and be readable)
   - name: VECTOR_SEARCH_ENDPOINT
     value: dbdemos_vs_endpoint
-
   - name: VECTOR_INDEX_NAME
-    value: users.kevin_ippen.voc_chunks_index   # <= fix if different
+    value: users.kevin_ippen.voc_chunks_index
 
+  # (Optional) LLM endpoint if your UI uses it
   - name: LLM_ENDPOINT
     value: databricks-gpt-oss-20b
