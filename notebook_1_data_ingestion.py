@@ -1,9 +1,9 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # Pizza Company VOC Analysis - Data Ingestion & Exploration
-# MAGIC 
+# MAGIC
 # MAGIC This notebook ingests customer feedback data into Unity Catalog and performs initial exploration for our RAG system.
-# MAGIC 
+# MAGIC
 # MAGIC **Requirements:**
 # MAGIC - Unity Catalog enabled workspace
 # MAGIC - DBR 14.3 LTS ML or higher
@@ -22,9 +22,9 @@ from pyspark.sql.types import *
 import re
 
 # Configuration
-CATALOG_NAME = "pizza_voc"
-SCHEMA_NAME = "customer_feedback" 
-TABLE_NAME = "voc_comments_raw"
+CATALOG_NAME = "users"
+SCHEMA_NAME = "kevin_ippen" 
+TABLE_NAME = "voc_pizza_table"
 
 # Initialize Spark session
 spark = SparkSession.builder.getOrCreate()
@@ -71,7 +71,7 @@ voc_schema = StructType([
 
 # Load CSV data
 # Update the path to your CSV file location in DBFS or external storage
-csv_path = "/path/to/your/voc_comments_redesign_6_13_2025All Redesign Comments.csv"
+csv_path = "/Volumes/users/kevin_ippen/voc-data-dpz/voc_comments_redesign_6_13_2025(All Redesign Comments).csv"
 
 df_raw = spark.read \
     .option("header", "true") \
@@ -183,10 +183,10 @@ for satisfaction_level in ["Highly Satisfied", "Not Satisfied", "Accuracy"]:
 
 # MAGIC %md
 # MAGIC ## Next Steps
-# MAGIC 
+# MAGIC
 # MAGIC ✅ **Completed:**
 # MAGIC - Data loaded into Unity Catalog
 # MAGIC - Basic data quality assessment
 # MAGIC - Table structure optimized for Delta Lake
-# MAGIC 
+# MAGIC
 # MAGIC **Next:** Run notebook `02_data_preparation_and_chunking.py` to prepare the data for vector search.

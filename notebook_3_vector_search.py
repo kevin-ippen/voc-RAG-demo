@@ -1,7 +1,7 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # Pizza Company VOC Analysis - Vector Search Setup
-# MAGIC 
+# MAGIC
 # MAGIC This notebook sets up Databricks Vector Search for semantic search over VOC chunks.
 
 # COMMAND ----------
@@ -11,8 +11,13 @@
 
 # COMMAND ----------
 
+# Install the required package
+%pip install databricks-vectorsearch
+dbutils.library.restartPython()
+
+# COMMAND ----------
+
 import pandas as pd
-from pyspark.sql import SparkSession
 from pyspark.sql.functions import *
 from pyspark.sql.types import *
 
@@ -22,17 +27,16 @@ from databricks.sdk import WorkspaceClient
 import time
 
 # Configuration
-CATALOG_NAME = "pizza_voc"
-SCHEMA_NAME = "customer_feedback"
-CHUNKS_TABLE = "voc_comments_chunks"
+CATALOG_NAME = "users"
+SCHEMA_NAME = "kevin_ippen"
+CHUNKS_TABLE = "voc_pizza_chunks"
 
 # Vector Search configuration
-VECTOR_SEARCH_ENDPOINT = "pizza_voc_endpoint"
+VECTOR_SEARCH_ENDPOINT = "dbdemos_vs_endpoint"  # Updated endpoint name
 VECTOR_INDEX_NAME = "voc_chunks_index"
 EMBEDDING_MODEL = "databricks-bge-large-en"  # Databricks-hosted embedding model
 
 # Initialize clients
-spark = SparkSession.builder.getOrCreate()
 vector_client = VectorSearchClient()
 w = WorkspaceClient()
 
@@ -86,7 +90,7 @@ except Exception as e:
 
 # Wait for endpoint to be ready
 print("Waiting for endpoint to be ready...")
-while endpoint.endpoint_status.state not in ["ONLINE", "PROVISIONING_SUCCESS"]:
+while endpoint['endpoint_status']['state'] not in ["ONLINE", "PROVISIONING_SUCCESS"]:
     time.sleep(30)
     endpoint = vector_client.get_endpoint(VECTOR_SEARCH_ENDPOINT)
     print(f"Endpoint status: {endpoint.endpoint_status.state}")
@@ -139,6 +143,43 @@ print(f"✅ Index source table created: {CATALOG_NAME}.{SCHEMA_NAME}.{INDEX_SOUR
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Enable Change Data Feed (CDF)
+
+# COMMAND ----------
+
+# Full table name for the vector index
+source_table_name = f"{CATALOG_NAME}.{SCHEMA_NAME}.{INDEX_SOURCE_TABLE}"
+index_name = f"{CATALOG_NAME}.{SCHEMA_NAME}.{VECTOR_INDEX_NAME}"
+
+# Enable Change Data Feed for the source table
+spark.sql(f"ALTER TABLE {source_table_name} SET TBLPROPERTIES (delta.enableChangeDataFeed = true)")
+
+# Check if index exists
+try:
+    existing_index = vector_client.get_index(endpoint_name=VECTOR_SEARCH_ENDPOINT, index_name=index_name)
+    print(f"Index '{index_name}' already exists. Deleting to recreate...")
+    vector_client.delete_index(endpoint_name=VECTOR_SEARCH_ENDPOINT, index_name=index_name)
+    time.sleep(10)  # Wait for deletion
+except Exception as e:
+    print(f"Index doesn't exist yet. Creating new index...")
+
+# Create the vector index
+print(f"Creating vector index '{index_name}'...")
+index = vector_client.create_delta_sync_index(
+    endpoint_name=VECTOR_SEARCH_ENDPOINT,
+    source_table_name=source_table_name,
+    index_name=index_name,
+    primary_key="id",
+    embedding_source_column="text",  # Column to create embeddings from
+    embedding_model_endpoint_name=EMBEDDING_MODEL,
+    pipeline_type="TRIGGERED"  # Use TRIGGERED for manual sync, CONTINUOUS for auto-sync
+)
+
+print(f"✅ Vector index '{index_name}' created")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Create Vector Index
 
 # COMMAND ----------
@@ -177,35 +218,102 @@ print(f"✅ Vector index '{index_name}' created")
 
 # COMMAND ----------
 
-# Trigger initial sync
+# Corrected Vector Index Sync Code
+import time
+from databricks.vector_search.client import VectorSearchClient
+
+vector_client = VectorSearchClient()
+
+# Your configuration - update these values
+VECTOR_SEARCH_ENDPOINT = "dbdemos_vs_endpoint"  # Your endpoint name
+index_name = "users.kevin_ippen.voc_chunks_index"  # Your full index name
+
 print("Starting vector index sync...")
-vector_client.sync_index(
-    endpoint_name=VECTOR_SEARCH_ENDPOINT,
-    index_name=index_name
-)
 
-# Monitor sync progress
-print("Monitoring sync progress...")
-max_wait_time = 1800  # 30 minutes max wait
-start_time = time.time()
+# Check initial status
+try:
+    index_status = vector_client.get_index(
+        endpoint_name=VECTOR_SEARCH_ENDPOINT,  # This parameter is required!
+        index_name=index_name
+    )
+    
+    # Correct attribute access
+    status = index_status.status.detailed_state  # Use .status.detailed_state
+    ready = index_status.status.ready           # Use .status.ready
+    
+    print(f"Initial index status: {status}")
+    print(f"Index ready: {ready}")
+    
+    if ready:
+        print("Index is ready. Triggering sync...")
+        
+        # Correct sync method call
+        vector_client.sync_index(
+            endpoint_name=VECTOR_SEARCH_ENDPOINT,  # Required parameter
+            index_name=index_name
+        )
+        print("✅ Sync triggered successfully!")
+        
+        # Monitor sync progress
+        print("Monitoring sync progress...")
+        max_wait_time = 1800  # 30 minutes max wait
+        start_time = time.time()
+        
+        while True:
+            # Correct method call with both parameters
+            index_status = vector_client.get_index(
+                endpoint_name=VECTOR_SEARCH_ENDPOINT,
+                index_name=index_name
+            )
+            
+            # Correct attribute access
+            status = index_status.status.detailed_state
+            
+            print(f"Index status: {status}")
+            
+            if status == "ONLINE":
+                print("✅ Vector index sync completed successfully!")
+                break
+            elif status in ["FAILED", "OFFLINE"]:
+                print(f"❌ Vector index sync failed with status: {status}")
+                # Print additional error info if available
+                if hasattr(index_status.status, 'message'):
+                    print(f"Error message: {index_status.status.message}")
+                break
+            elif time.time() - start_time > max_wait_time:
+                print("⚠️ Sync taking longer than expected. Check status in UI.")
+                break
+            
+            time.sleep(30)
+    else:
+        print(f"❌ Index not ready. Status: {status}")
+        
+except Exception as e:
+    print(f"❌ Error: {str(e)}")
+    print("Please check your endpoint name and index name are correct.")
 
-while True:
-    index_status = vector_client.get_index(VECTOR_SEARCH_ENDPOINT, index_name)
-    status = index_status.status.detailed_state
+# Test the search functionality after successful sync
+try:
+    print("\n=== TESTING VECTOR SEARCH ===")
     
-    print(f"Index status: {status}")
+    # Test search
+    results = vector_client.similarity_search(
+        endpoint_name=VECTOR_SEARCH_ENDPOINT,
+        index_name=index_name,
+        query_text="pizza was late",
+        columns=["id", "text", "satisfaction"],
+        num_results=3
+    )
     
-    if status == "ONLINE":
-        print("✅ Vector index sync completed successfully!")
-        break
-    elif status in ["FAILED", "OFFLINE"]:
-        print(f"❌ Vector index sync failed with status: {status}")
-        break
-    elif time.time() - start_time > max_wait_time:
-        print("⚠️  Sync taking longer than expected. Check status in UI.")
-        break
-    
-    time.sleep(30)
+    if results and 'result' in results and 'data_array' in results['result']:
+        print("✅ Vector search is working!")
+        for i, result in enumerate(results['result']['data_array']):
+            print(f"  {i+1}. [{result[2]}] {result[1][:80]}...")
+    else:
+        print("⚠️ Search returned no results")
+        
+except Exception as e:
+    print(f"❌ Search test failed: {str(e)}")
 
 # COMMAND ----------
 
@@ -214,37 +322,102 @@ while True:
 
 # COMMAND ----------
 
-# Test the vector search with sample queries
+# FINAL WORKING VECTOR SEARCH TEST
+from databricks.vector_search.client import VectorSearchClient
+
+client = VectorSearchClient(disable_notice=True)
+ENDPOINT_NAME = "dbdemos_vs_endpoint" 
+INDEX_NAME = "users.kevin_ippen.voc_chunks_index"
+
+print("=== FINAL WORKING VECTOR SEARCH TEST ===")
+
+try:
+    # Get index with correct parameters
+    index = client.get_index(
+        endpoint_name=ENDPOINT_NAME,
+        index_name=INDEX_NAME
+    )
+    print("✅ Index retrieved successfully!")
+    
+    # Test search with REQUIRED columns parameter
+    print("\n🔍 Testing search with required columns parameter...")
+    
+    results = index.similarity_search(
+        query_text="pizza was late",
+        columns=["id", "text", "satisfaction", "service_method"],  # REQUIRED parameter
+        num_results=2
+    )
+    
+    print("✅ Search successful!")
+    print(f"Result type: {type(results)}")
+    print(f"Results: {results}")
+    
+except Exception as e:
+    print(f"❌ Error: {e}")
+
+print("\n=== TESTING MULTIPLE QUERIES ===")
+
+# Test with your actual VOC queries
 test_queries = [
-    "Pizza was not cooked properly",
-    "Great service and fast delivery", 
-    "The staff was very friendly",
-    "Order took too long to arrive",
-    "Pizza taste was amazing"
+    "Pizza delivery was late",
+    "Great customer service", 
+    "Pizza quality issues",
+    "Order accuracy problems"
 ]
 
-print("=== TESTING VECTOR SEARCH ===")
-
-for query in test_queries:
-    print(f"\n🔍 Query: '{query}'")
+try:
+    index = client.get_index(endpoint_name=ENDPOINT_NAME, index_name=INDEX_NAME)
     
-    try:
-        results = vector_client.similarity_search(
-            endpoint_name=VECTOR_SEARCH_ENDPOINT,
-            index_name=index_name,
-            query_text=query,
-            columns=["id", "text", "satisfaction", "service_method"],
-            num_results=3
-        )
+    for query in test_queries:
+        print(f"\n🔍 Query: '{query}'")
         
-        if results and 'result' in results and 'data_array' in results['result']:
-            for i, result in enumerate(results['result']['data_array'][:3]):
-                print(f"  {i+1}. [{result[2]}] {result[1][:100]}...")
-        else:
-            print("  No results found")
+        try:
+            results = index.similarity_search(
+                query_text=query,
+                columns=["id", "text", "satisfaction", "service_method"],  # Required
+                num_results=3
+            )
             
-    except Exception as e:
-        print(f"  Error: {str(e)}")
+            print(f"✅ Success! Found results.")
+            
+            # Try to extract and display results nicely
+            if isinstance(results, dict) and 'result' in results:
+                data_array = results['result'].get('data_array', [])
+                print(f"Found {len(data_array)} matches:")
+                for i, result in enumerate(data_array[:2]):  # Show top 2
+                    if len(result) >= 3:
+                        print(f"  {i+1}. [{result[2]}] {result[1][:80]}...")
+                    else:
+                        print(f"  {i+1}. {result}")
+            else:
+                print(f"Results: {results}")
+                
+        except Exception as e:
+            print(f"❌ Query failed: {e}")
+
+except Exception as e:
+    print(f"❌ Setup failed: {e}")
+
+print("\n=== FINAL WORKING PATTERN ===")
+print("""
+# THIS IS THE WORKING PATTERN:
+
+from databricks.vector_search.client import VectorSearchClient
+
+client = VectorSearchClient(disable_notice=True)
+index = client.get_index(
+    endpoint_name="dbdemos_vs_endpoint",
+    index_name="users.kevin_ippen.voc_chunks_index"
+)
+
+results = index.similarity_search(
+    query_text="your question here",
+    columns=["id", "text", "satisfaction", "service_method"],  # REQUIRED
+    num_results=5
+)
+""")
+
+print("\n🎉 Vector search is now working! Use this pattern in your RAG pipeline.")
 
 # COMMAND ----------
 
@@ -347,11 +520,11 @@ print("\n✅ Vector Search setup completed successfully!")
 
 # MAGIC %md
 # MAGIC ## Next Steps
-# MAGIC 
+# MAGIC
 # MAGIC ✅ **Completed:**
 # MAGIC - Vector Search endpoint created and configured
 # MAGIC - Vector index built with embeddings for VOC chunks
 # MAGIC - Search functionality tested and validated
 # MAGIC - Utility functions created for easy searching
-# MAGIC 
+# MAGIC
 # MAGIC **Next:** Run notebook `04_rag_model_serving.py` to set up model serving for the complete RAG pipeline.

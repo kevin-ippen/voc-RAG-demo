@@ -1,7 +1,7 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # Pizza Company VOC Analysis - Data Preparation & Chunking
-# MAGIC 
+# MAGIC
 # MAGIC This notebook prepares the VOC data for vector search by creating meaningful chunks and generating embeddings.
 
 # COMMAND ----------
@@ -19,10 +19,10 @@ import re
 from typing import List
 
 # Configuration
-CATALOG_NAME = "pizza_voc"
-SCHEMA_NAME = "customer_feedback"
-SOURCE_TABLE = "voc_comments_raw"
-CHUNKS_TABLE = "voc_comments_chunks"
+CATALOG_NAME = "users"
+SCHEMA_NAME = "kevin_ippen"
+SOURCE_TABLE = "voc_pizza_table"
+CHUNKS_TABLE = "voc_pizza_chunks"
 
 # Chunking parameters
 MAX_CHUNK_LENGTH = 300  # Characters per chunk
@@ -130,6 +130,21 @@ create_chunks_udf = udf(create_chunks, ArrayType(StringType()))
 
 # COMMAND ----------
 
+# Define the UDF to create chunks
+from pyspark.sql.functions import udf
+from pyspark.sql.types import ArrayType, StringType
+
+def create_chunks(comments):
+    # Example logic for creating chunks
+    # Ensure max() is used correctly
+    chunks = []
+    max_length = 100  # Example max length for a chunk
+    for i in range(0, len(comments), max_length):
+        chunks.append(comments[i:i + max_length])
+    return chunks
+
+create_chunks_udf = udf(create_chunks, ArrayType(StringType()))
+
 # Create chunks with full context metadata
 df_with_chunks = df_source.withColumn(
     "chunks", create_chunks_udf(col("comments"))
@@ -150,7 +165,7 @@ df_chunks = df_with_chunks.select(
     posexplode(col("chunks")).alias("chunk_index", "chunk_text")
 ).withColumn("chunk_id", concat(col("source_record_id"), lit("_"), col("chunk_index")))
 
-print(f"Created {df_chunks.count()} chunks from {df_with_chunks.count()} comments")
+display(df_chunks)
 
 # COMMAND ----------
 
@@ -293,12 +308,12 @@ print("✅ Sample dataset created for testing")
 
 # MAGIC %md
 # MAGIC ## Next Steps
-# MAGIC 
+# MAGIC
 # MAGIC ✅ **Completed:**
 # MAGIC - Text cleaning and chunking strategy implemented
 # MAGIC - Chunks created with contextual metadata
 # MAGIC - Data quality assessment performed
 # MAGIC - Chunks saved to Unity Catalog
 # MAGIC - Analytical views created
-# MAGIC 
+# MAGIC
 # MAGIC **Next:** Run notebook `03_vector_search_setup.py` to create embeddings and set up vector search.
