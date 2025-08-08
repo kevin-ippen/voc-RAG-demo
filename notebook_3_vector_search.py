@@ -439,22 +439,24 @@ def search_voc_comments(query: str, num_results: int = 5, satisfaction_filter: s
         List of matching chunks with metadata
     """
     try:
-        # Build filters if specified
-        filters = None
-        if satisfaction_filter:
-            filters = {"satisfaction": satisfaction_filter}
-        
-        results = vector_client.similarity_search(
-            endpoint_name=VECTOR_SEARCH_ENDPOINT,
-            index_name=index_name,
-            query_text=query,
-            columns=[
-                "id", "text", "satisfaction", "service_method", 
-                "customer_type", "order_source", "service_time"
-            ],
-            num_results=num_results,
-            filters=filters
+        # Get the index object with correct parameters
+        index_obj = vector_client.get_index(
+            ENDPOINT_NAME,
+            INDEX_NAME
         )
+        
+        # Build search parameters
+        search_params = {
+            "query_text": query,
+            "columns": ["id", "text", "satisfaction", "service_method", "customer_type"],  # Required
+            "num_results": num_results
+        }
+        
+        # Add filters if specified
+        if satisfaction_filter:
+            search_params["filters"] = {"satisfaction": satisfaction_filter}
+        
+        results = index_obj.similarity_search(**search_params)
         
         if results and 'result' in results and 'data_array' in results['result']:
             return results['result']['data_array']
@@ -496,25 +498,6 @@ get_satisfaction_insights("pizza quality", top_k=2)
 
 # MAGIC %md
 # MAGIC ## Vector Index Summary
-
-# COMMAND ----------
-
-# Get final index statistics
-index_info = vector_client.get_index(VECTOR_SEARCH_ENDPOINT, index_name)
-
-print("=== VECTOR INDEX SUMMARY ===")
-print(f"Index Name: {index_name}")
-print(f"Endpoint: {VECTOR_SEARCH_ENDPOINT}")
-print(f"Status: {index_info.status.detailed_state}")
-print(f"Embedding Model: {EMBEDDING_MODEL}")
-print(f"Source Table: {source_table_name}")
-
-# Show index properties
-if hasattr(index_info, 'index_spec'):
-    print(f"Primary Key: {index_info.index_spec.primary_key}")
-    print(f"Embedding Source: {index_info.index_spec.embedding_source_column}")
-
-print("\n✅ Vector Search setup completed successfully!")
 
 # COMMAND ----------
 

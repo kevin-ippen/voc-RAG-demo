@@ -1,7 +1,7 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # Pizza Company VOC Analysis - RAG Model Serving
-# MAGIC 
+# MAGIC
 # MAGIC This notebook sets up model serving for a complete RAG pipeline using Llama and vector search.
 
 # COMMAND ----------
@@ -26,9 +26,9 @@ from databricks.sdk.service.serving import EndpointCoreConfigInput, ServedEntity
 CATALOG_NAME = "pizza_voc"
 SCHEMA_NAME = "customer_feedback"
 
-# Vector Search configuration
-VECTOR_SEARCH_ENDPOINT = "pizza_voc_endpoint"
-VECTOR_INDEX_NAME = f"{CATALOG_NAME}.{SCHEMA_NAME}.voc_chunks_index"
+# Vector Search configuration - CORRECTED
+VECTOR_SEARCH_ENDPOINT = "dbdemos_vs_endpoint"
+VECTOR_INDEX_NAME = "users.kevin_ippen.voc_chunks_index"
 
 # Model Serving configuration
 RAG_ENDPOINT_NAME = "pizza-voc-rag-assistant"
@@ -107,12 +107,15 @@ def rag_pipeline(question: str, num_contexts: int = 5) -> Dict[str, Any]:
     """
     
     try:
-        # Step 1: Vector search for relevant contexts
-        search_results = vector_client.similarity_search(
+        # Step 1: Get the index object and perform vector search with correct API
+        index_obj = vector_client.get_index(
             endpoint_name=VECTOR_SEARCH_ENDPOINT,
-            index_name=VECTOR_INDEX_NAME,
+            index_name=VECTOR_INDEX_NAME
+        )
+        
+        search_results = index_obj.similarity_search(
             query_text=question,
-            columns=["id", "text", "satisfaction", "service_method", "customer_type"],
+            columns=["id", "text", "satisfaction", "service_method", "customer_type"],  # Required
             num_results=num_contexts
         )
         
@@ -122,20 +125,19 @@ def rag_pipeline(question: str, num_contexts: int = 5) -> Dict[str, Any]:
         
         if search_results and 'result' in search_results and 'data_array' in search_results['result']:
             for result in search_results['result']['data_array']:
-                # result format: [id, text, satisfaction, service_method, customer_type]
+                # result format: [id, text, satisfaction, service_method, score] (customer_type may not be included)
                 contexts.append(result[1])  # text
                 metadata.append({
                     "id": result[0],
                     "satisfaction": result[2],
                     "service_method": result[3],
-                    "customer_type": result[4]
+                    "score": result[4] if len(result) > 4 else 0
                 })
         
         # Step 2: Create RAG prompt
         rag_prompt = create_rag_response(question, contexts)
         
-        # Step 3: For now, return structured response
-        # In production, this would call the LLM endpoint
+        # Step 3: Return structured response
         response_data = {
             "question": question,
             "contexts_found": len(contexts),
@@ -453,18 +455,22 @@ from databricks.vector_search.client import VectorSearchClient
 
 # Initialize
 vector_client = VectorSearchClient()
-VECTOR_SEARCH_ENDPOINT = "pizza_voc_endpoint"
-VECTOR_INDEX_NAME = "pizza_voc.customer_feedback.voc_chunks_index"
+VECTOR_SEARCH_ENDPOINT = "dbdemos_vs_endpoint"
+VECTOR_INDEX_NAME = "users.kevin_ippen.voc_chunks_index"
 
 def rag_pipeline(question: str, num_contexts: int = 5):
     """RAG pipeline function."""
     try:
-        # Vector search
-        search_results = vector_client.similarity_search(
+        # Get index object with correct parameters
+        index_obj = vector_client.get_index(
             endpoint_name=VECTOR_SEARCH_ENDPOINT,
-            index_name=VECTOR_INDEX_NAME,
+            index_name=VECTOR_INDEX_NAME
+        )
+        
+        # Vector search with required columns parameter
+        search_results = index_obj.similarity_search(
             query_text=question,
-            columns=["id", "text", "satisfaction", "service_method"],
+            columns=["id", "text", "satisfaction", "service_method"],  # Required
             num_results=num_contexts
         )
         
@@ -473,7 +479,7 @@ def rag_pipeline(question: str, num_contexts: int = 5):
         
         if search_results and 'result' in search_results and 'data_array' in search_results['result']:
             for result in search_results['result']['data_array']:
-                contexts.append(result[1])
+                contexts.append(result[1])  # text
                 metadata.append({
                     "satisfaction": result[2],
                     "service_method": result[3]
@@ -601,7 +607,7 @@ print("   5. Implement user feedback collection for continuous improvement")
 
 # MAGIC %md
 # MAGIC ## Architecture Summary
-# MAGIC 
+# MAGIC
 # MAGIC ```
 # MAGIC Customer Feedback (CSV)
 # MAGIC         ↓
@@ -615,7 +621,7 @@ print("   5. Implement user feedback collection for continuous improvement")
 # MAGIC         ↓
 # MAGIC Databricks App (Streamlit Interface)
 # MAGIC ```
-# MAGIC 
+# MAGIC
 # MAGIC **Key Features:**
 # MAGIC - **Data Governance**: Unity Catalog for data lineage and security
 # MAGIC - **Scalability**: Delta Lake for performance and reliability  
