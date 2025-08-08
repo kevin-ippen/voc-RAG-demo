@@ -11,7 +11,7 @@ def _env(name: str, default: str | None = None) -> str | None:
 class Config:
     # Core DS/LLM endpoints (env-first)
     VECTOR_SEARCH_ENDPOINT: str = _env("VECTOR_SEARCH_ENDPOINT", "dbdemos_vs_endpoint")
-    VECTOR_INDEX_NAME: str = _env("VECTOR_INDEX_NAME", "users.kevin_ippen.voc_pizza_index")
+    VECTOR_INDEX_NAME: str = _env("VECTOR_INDEX_NAME", "users.kevin_ippen.voc_chunks_index")
     LLM_ENDPOINT_NAME: str = _env("LLM_ENDPOINT", "databricks-gpt-oss-20b")
 
     # Query tuning

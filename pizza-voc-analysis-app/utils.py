@@ -116,7 +116,7 @@ class VectorSearchManager:
         meta_filters = {k: v for k, v in filters.items() if v}
 
         if self._client is not None:
-            # Use the typed client, handling top_k/num_results rename
+            # Use typed client, handling num_results/top_k rename
             kwargs = {
                 "index_name": self.index_fqn,
                 "endpoint_name": self.endpoint_name,
@@ -130,14 +130,14 @@ class VectorSearchManager:
             hits = getattr(res, "result", None) or getattr(res, "data", None) or []
             return self._normalize_hits(hits)
 
-        # ---------- REST fallback (compatible with older backends) ----------
-        # POST /api/2.0/vector-search/indexes/{index_fqn}/query
-        # Required: 'query': {'text': ...}, 'num_results', 'endpoint_name', and **'columns'**
+        # ---------- REST fallback for older backends ----------
+        # Older API expects top-level 'query_text' or 'query_vector', and a 'columns' array.
         body: Dict[str, Any] = {
-            "query": {"text": query_text},            # <- 'text' not 'query_text'
+            "query_text": query_text,          # <- top-level, not nested
             "num_results": top_k,
             "endpoint_name": self.endpoint_name,
-            "columns": ["text", "metadata"],          # <- explicitly ask for the common fields
+            "columns": ["text", "metadata"],   # adjust if your index uses different names
+            "return_scores": True,
         }
         if meta_filters:
             body["filters"] = {"metadata": meta_filters}
@@ -149,14 +149,18 @@ class VectorSearchManager:
                 body=body,
             )
         except Exception as e:
-            detail = getattr(self, "_ctor_error", None)
-            raise RuntimeError(
-                "Vector search failed. Client ctor error: "
-                f"{detail}; REST error: {e}"
-            )
+            # Don’t confuse users with typed-client ctor noise; show the actual REST error
+            raise RuntimeError(f"Vector search failed (REST): {e}")
 
         hits = raw.get("result") or raw.get("data") or []
         return self._normalize_hits(hits)
+
+    def describe_index(self) -> Dict[str, Any]:
+        """Fetch index metadata to see available columns/fields."""
+        return self.ws.api_client.do(
+            "GET", f"/api/2.0/vector-search/indexes/{self.index_fqn}"
+        )
+
 
     @staticmethod
     def _normalize_hits(hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
