@@ -12,9 +12,8 @@ def get_workspace():
     return _make_ws()
 
 @st.cache_resource(show_spinner=True)
-def get_vsm(ws):
-    # Builds a VS client + binds endpoint/index from env/config
-    return VectorSearchManager(ws=ws)
+def get_vsm(_ws):
+    return VectorSearchManager(ws=_ws)
 
 WS = get_workspace()
 VSM = get_vsm(WS)
