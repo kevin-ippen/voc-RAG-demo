@@ -136,7 +136,7 @@ class VectorSearchManager:
             "query_text": query_text,          # <- top-level, not nested
             "num_results": top_k,
             "endpoint_name": self.endpoint_name,
-            "columns": ["text", "metadata"],   # adjust if your index uses different names
+            "columns": ["text"],   # adjust if your index uses different names
             "return_scores": True,
         }
         if meta_filters:
