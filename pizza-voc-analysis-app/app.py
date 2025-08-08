@@ -25,10 +25,47 @@ st.set_page_config(
 # Initialize components
 @st.cache_resource
 def initialize_rag_system():
-    """Initialize the RAG system components."""
-    vector_manager = VectorSearchManager()
-    rag_pipeline = RAGPipeline(vector_manager)
-    return vector_manager, rag_pipeline
+    """Initialize the RAG system components with detailed error handling."""
+    try:
+        # Test vector search connection first
+        from databricks.vector_search.client import VectorSearchClient
+        
+        client = VectorSearchClient(disable_notice=True)
+        
+        # Try to get the index
+        index = client.get_index(
+            endpoint_name=Config.VECTOR_SEARCH_ENDPOINT,
+            index_name=Config.VECTOR_INDEX_NAME
+        )
+        
+        # Test a simple search to verify it's working
+        test_results = index.similarity_search(
+            query_text="test",
+            columns=Config.SEARCH_COLUMNS,
+            num_results=1
+        )
+        
+        # If we get here, vector search is working
+        vector_manager = VectorSearchManager()
+        rag_pipeline = RAGPipeline(vector_manager)
+        
+        return vector_manager, rag_pipeline
+        
+    except Exception as e:
+        # Provide more specific error information
+        error_msg = str(e)
+        
+        if "does not exist" in error_msg.lower():
+            raise Exception(f"Vector index '{Config.VECTOR_INDEX_NAME}' not found. Please check the index name.")
+        elif "endpoint" in error_msg.lower():
+            raise Exception(f"Vector search endpoint '{Config.VECTOR_SEARCH_ENDPOINT}' not accessible. Please check the endpoint name.")
+        elif "permission" in error_msg.lower() or "unauthorized" in error_msg.lower():
+            raise Exception("Permission denied. Please check Unity Catalog access permissions.")
+        elif "columns" in error_msg.lower():
+            raise Exception("Column mismatch. Please verify the vector index schema matches expected columns.")
+        else:
+            raise Exception(f"Initialization failed: {error_msg}")
+
 
 # Custom CSS
 st.markdown("""
@@ -61,13 +98,31 @@ def main():
     st.markdown('<h1 class="main-header">🍕 Pizza Company VOC Analysis</h1>', unsafe_allow_html=True)
     st.markdown("### AI-Powered Customer Feedback Insights")
     
-    # Initialize RAG system
+    # Initialize RAG system with proper error handling
+    vector_manager = None
+    rag_pipeline = None
+    initialization_success = False
+    
     try:
         vector_manager, rag_pipeline = initialize_rag_system()
         st.success("✅ RAG system initialized successfully!")
+        initialization_success = True
     except Exception as e:
         st.error(f"❌ Failed to initialize RAG system: {str(e)}")
-        st.stop()
+        st.error("Please check your configuration and try again.")
+        st.markdown("""
+        **Common issues:**
+        - Vector search endpoint not accessible
+        - Vector index not found or not ready
+        - Authentication/permission issues
+        
+        **To fix:**
+        1. Verify your vector search endpoint is running
+        2. Check that the vector index exists and is online
+        3. Ensure proper Unity Catalog permissions
+        """)
+        # Don't stop completely, show the error state
+        initialization_success = False
     
     # Sidebar
     with st.sidebar:
@@ -113,6 +168,96 @@ def main():
                 st.session_state.selected_question = question
     
     # Main content based on mode
+    if not initialization_success:
+        # Configuration help if initialization failed
+        st.warning("⚠️ RAG system not available. Please fix the configuration issues above.")
+        
+        # Add debug information
+        with st.expander("🔍 Debug Information"):
+            st.markdown("**Current Configuration:**")
+            st.code(f"""
+Vector Search Endpoint: {Config.VECTOR_SEARCH_ENDPOINT}
+Vector Index Name: {Config.VECTOR_INDEX_NAME}
+Search Columns: {Config.SEARCH_COLUMNS}
+            """)
+            
+            # Show validation results
+            st.markdown("**Configuration Validation:**")
+            if Config.validate_config():
+                st.success("✅ Configuration format is valid")
+            else:
+                st.error("❌ Configuration format is invalid")
+            
+            # Quick connection test button
+            if st.button("🧪 Test Connection"):
+                with st.spinner("Testing vector search connection..."):
+                    try:
+                        from databricks.vector_search.client import VectorSearchClient
+                        client = VectorSearchClient(disable_notice=True)
+                        
+                        # Test endpoint
+                        try:
+                            endpoint = client.get_endpoint(Config.VECTOR_SEARCH_ENDPOINT)
+                            st.success(f"✅ Endpoint '{Config.VECTOR_SEARCH_ENDPOINT}' accessible")
+                        except Exception as e:
+                            st.error(f"❌ Endpoint error: {str(e)}")
+                            
+                        # Test index
+                        try:
+                            index = client.get_index(
+                                endpoint_name=Config.VECTOR_SEARCH_ENDPOINT,
+                                index_name=Config.VECTOR_INDEX_NAME
+                            )
+                            st.success(f"✅ Index '{Config.VECTOR_INDEX_NAME}' accessible")
+                            
+                            # Test search
+                            results = index.similarity_search(
+                                query_text="test",
+                                columns=Config.SEARCH_COLUMNS,
+                                num_results=1
+                            )
+                            st.success("✅ Search functionality working")
+                            
+                        except Exception as e:
+                            st.error(f"❌ Index error: {str(e)}")
+                            
+                    except Exception as e:
+                        st.error(f"❌ General connection error: {str(e)}")
+        
+        st.subheader("🔧 Troubleshooting Guide")
+        st.markdown("""
+        **Step 1: Verify Vector Search Setup**
+        - Check that your vector search endpoint is running
+        - Ensure the vector index exists and is online
+        - Verify the index name matches exactly
+        
+        **Step 2: Test Access Permissions**
+        ```python
+        from databricks.vector_search.client import VectorSearchClient
+        client = VectorSearchClient(disable_notice=True)
+        
+        # Test endpoint
+        endpoint = client.get_endpoint("dbdemos_vs_endpoint")
+        print(f"Endpoint status: {endpoint.endpoint_status}")
+        
+        # Test index
+        index = client.get_index(
+            endpoint_name="dbdemos_vs_endpoint",
+            index_name="users.kevin_ippen.voc_chunks_index"
+        )
+        print("Index accessible!")
+        ```
+        
+        **Step 3: Common Solutions**
+        - **Index not found**: Check the exact index name in your workspace
+        - **Permission denied**: Ensure Unity Catalog access permissions
+        - **Endpoint offline**: Wait for endpoint to come online or restart it
+        - **Column mismatch**: Verify the index schema matches expected columns
+        """)
+        
+        return  # Exit early if not initialized
+    
+    # Normal operation if initialization succeeded
     if analysis_mode == "💬 Ask Questions":
         show_question_interface(rag_pipeline, num_results, satisfaction_filter)
     
@@ -130,6 +275,11 @@ def show_question_interface(rag_pipeline: RAGPipeline, num_results: int, satisfa
     
     st.header("💬 Ask Questions About Customer Feedback")
     
+    # Defensive check
+    if rag_pipeline is None:
+        st.error("❌ RAG pipeline not available. Please check the configuration.")
+        return
+    
     # Question input
     default_question = st.session_state.get('selected_question', '')
     question = st.text_input(
@@ -144,7 +294,11 @@ def show_question_interface(rag_pipeline: RAGPipeline, num_results: int, satisfa
     
     if ask_button and question:
         with st.spinner("Analyzing customer feedback..."):
-            response = rag_pipeline.ask_question(question, num_results, satisfaction_filter)
+            try:
+                response = rag_pipeline.ask_question(question, num_results, satisfaction_filter)
+            except Exception as e:
+                st.error(f"❌ Error processing question: {str(e)}")
+                return
         
         if response["status"] == "success":
             st.success(f"✅ Found {response['contexts_found']} relevant customer comments")
@@ -158,24 +312,30 @@ def show_question_interface(rag_pipeline: RAGPipeline, num_results: int, satisfa
                 
                 with col1:
                     st.subheader("📊 Satisfaction Distribution")
-                    fig = px.pie(
-                        values=satisfaction_counts.values,
-                        names=satisfaction_counts.index,
-                        title="Feedback by Satisfaction Level"
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
+                    try:
+                        fig = px.pie(
+                            values=satisfaction_counts.values,
+                            names=satisfaction_counts.index,
+                            title="Feedback by Satisfaction Level"
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                    except Exception as e:
+                        st.error(f"Error creating satisfaction chart: {str(e)}")
                 
                 with col2:
                     st.subheader("📈 Service Method Breakdown")
-                    service_methods = [meta.get("service_method", "Unknown") for meta in response["metadata"]]
-                    service_counts = pd.Series(service_methods).value_counts()
-                    
-                    fig = px.bar(
-                        x=service_counts.index,
-                        y=service_counts.values,
-                        title="Feedback by Service Method"
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
+                    try:
+                        service_methods = [meta.get("service_method", "Unknown") for meta in response["metadata"]]
+                        service_counts = pd.Series(service_methods).value_counts()
+                        
+                        fig = px.bar(
+                            x=service_counts.index,
+                            y=service_counts.values,
+                            title="Feedback by Service Method"
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                    except Exception as e:
+                        st.error(f"Error creating service method chart: {str(e)}")
             
             # Show relevant contexts
             st.subheader("🎯 Relevant Customer Comments")
@@ -191,6 +351,19 @@ def show_question_interface(rag_pipeline: RAGPipeline, num_results: int, satisfa
         
         else:
             st.error(f"❌ Error: {response['error']}")
+            
+            # Provide some troubleshooting help
+            st.markdown("""
+            **Possible issues:**
+            - Vector search connection problem
+            - No matching customer feedback found
+            - Query processing error
+            
+            Try:
+            - Using different search terms
+            - Removing satisfaction filters
+            - Checking the system status above
+            """)
 
 def show_satisfaction_analysis(vector_manager: VectorSearchManager, num_results: int):
     """Show satisfaction trend analysis."""
