@@ -20,10 +20,29 @@ with st.expander("Auth env check"):
 
 
 # ----- Databricks clients -----
+from databricks.sdk import WorkspaceClient
 from mlflow.deployments import get_deploy_client
 from databricks.vector_search.client import VectorSearchClient
-from databricks import sql
-from databricks.sdk.core import Config
+from databricks.sdk.core import Config as SDKConfig
+
+def make_ws_for_app() -> WorkspaceClient:
+    import os
+    host = os.getenv("DATABRICKS_HOST")
+    cid  = os.getenv("DATABRICKS_CLIENT_ID")
+    csec = os.getenv("DATABRICKS_CLIENT_SECRET")
+    if not (host and cid and csec):
+        raise RuntimeError("Missing HOST/CLIENT_ID/CLIENT_SECRET")
+
+    cfg = SDKConfig(
+        host=host,               # MUST include https://
+        auth_type="oauth-m2m",   # force SP path
+        client_id=cid,
+        client_secret=csec,
+        # AWS: no token endpoint needed
+    )
+    return WorkspaceClient(config=cfg)
+
+WS = make_ws_for_app()
 
 # ------------- Environment / Config -------------
 DATABRICKS_HOST = os.getenv("DATABRICKS_HOST")  # required for OBO and SDKs
