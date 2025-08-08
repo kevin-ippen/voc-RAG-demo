@@ -19,21 +19,15 @@ env:
     value: "0.0.0.0"
   - name: STREAMLIT_LOGGER_LEVEL
     value: "info"
-
-  # Required for all Databricks SDK calls / OBO
   - name: DATABRICKS_HOST
     value: e2-demo-field-eng.cloud.databricks.com
-
-  # Vector Search (used by the search panel)
   - name: VECTOR_SEARCH_ENDPOINT
     value: users.kevin_ippen.voc_chunks_index
   - name: VECTOR_INDEX_NAME
     value: users.kevin_ippen.voc_pizza_chunks_for_index
-
-  # Optional: LLM summary (omit if you don’t need summaries yet)
   - name: LLM_ENDPOINT
     value: databricks-gpt-oss-20b
-
-  # For the “OBO Test” section
   - name: SQL_WAREHOUSE_HTTP_PATH
     value: /sql/1.0/warehouses/<your-warehouse-id>
+
+
