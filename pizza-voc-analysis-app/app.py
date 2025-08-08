@@ -1,45 +1,67 @@
-# app.py
-# import os
+# app.py — Pizza VOC Explorer (clean, self-contained)
+
+from __future__ import annotations
+import os
 import json
 import logging
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 
 import streamlit as st
 import pandas as pd
 
-with st.expander("Auth env check"):
-    import os
-    st.write({
-        "HOST set": bool(os.getenv("DATABRICKS_HOST")),
-        "CLIENT_ID set": bool(os.getenv("DATABRICKS_CLIENT_ID")),
-        "CLIENT_SECRET set": bool(os.getenv("DATABRICKS_CLIENT_SECRET")),
-        "TOKEN_ENDPOINT set": bool(os.getenv("DATABRICKS_OAUTH_TOKEN_ENDPOINT")),
-        "PAT set": bool(os.getenv("DATABRICKS_TOKEN")),
-        "AUTH_TYPE": os.getenv("DATABRICKS_AUTH_TYPE"),
-    })
-
-
-# ----- Databricks clients -----
+# Databricks SDK / clients
 from databricks.sdk import WorkspaceClient
-from mlflow.deployments import get_deploy_client
-from databricks.vector_search.client import VectorSearchClient
 from databricks.sdk.core import Config as SDKConfig
-from utils import VectorSearchManager
+from databricks.vector_search.client import VectorSearchClient
+from databricks import sql
+from mlflow.deployments import get_deploy_client
+
+# ------------- Streamlit setup -------------
+st.set_page_config(page_title="Pizza VOC Explorer", page_icon="🍕", layout="wide")
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("pizza-voc-app")
+
+# ------------- Environment / Config -------------
+DATABRICKS_HOST = os.getenv("DATABRICKS_HOST")  # MUST include https://
+VECTOR_SEARCH_ENDPOINT = os.getenv("VECTOR_SEARCH_ENDPOINT")         # e.g., dbdemos_vs_endpoint
+VECTOR_INDEX_NAME = os.getenv("VECTOR_INDEX_NAME")                   # e.g., users.kevin.voc_index
+LLM_ENDPOINT = os.getenv("LLM_ENDPOINT")                             # e.g., databricks-gpt-oss-20b
+
+SEARCH_COLUMNS: List[str] = [
+    # match your index schema; safe defaults (adjust as needed)
+    "id",
+    "text",
+    "satisfaction",
+    "service_method",
+    "customer_type",
+    "order_source",
+    "order_date",
+    "service_time",
+]
+
+SATISFACTION_VALUES = ["", "Satisfied", "Neutral", "Dissatisfied"]  # <- align to your real values
+SERVICE_METHOD_VALUES = ["", "Delivery", "Pickup"]
+CUSTOMER_TYPE_VALUES = ["", "New", "Returning"]
+ORDER_SOURCE_VALUES = ["", "App", "Web", "Phone"]
 
 
+# ------------- Auth / Workspace bootstrap -------------
 def _make_ws_for_app() -> WorkspaceClient:
-    host = os.getenv("DATABRICKS_HOST")
-    cid  = os.getenv("DATABRICKS_CLIENT_ID")
+    host = DATABRICKS_HOST
+    cid = os.getenv("DATABRICKS_CLIENT_ID")
     csec = os.getenv("DATABRICKS_CLIENT_SECRET")
+
     if not host or not host.startswith("http"):
-        raise RuntimeError("DATABRICKS_HOST missing/invalid (must include https://)")
+        raise RuntimeError("DATABRICKS_HOST missing/invalid (must include https://...)")
     if not (cid and csec):
-        raise RuntimeError("Service principal creds not found in env (CLIENT_ID/SECRET).")
+        raise RuntimeError("Service principal creds not found (DATABRICKS_CLIENT_ID/SECRET).")
+
     cfg = SDKConfig(
         host=host,
-        auth_type="oauth-m2m",
+        auth_type="oauth-m2m",     # force SP path
         client_id=cid,
         client_secret=csec,
+        # Azure would also need oauth_token_endpoint; AWS doesn't
     )
     return WorkspaceClient(config=cfg)
 
@@ -48,121 +70,67 @@ def get_workspace() -> WorkspaceClient:
     return _make_ws_for_app()
 
 WS = get_workspace()
-with st.expander("Auth path (runtime)"):
-    try:
-        me = WS.current_user.me()
-        st.write({"workspace_user": me.user_name})
-        st.success("WorkspaceClient auth OK (oauth-m2m)")
-    except Exception as e:
-        st.error(f"WorkspaceClient failed: {e}")
 
 
+# ------------- Vector Search helper -------------
+class VectorSearchManager:
+    def __init__(self, ws: WorkspaceClient, endpoint_name: str, index_name: str, columns: List[str]):
+        if not endpoint_name:
+            raise ValueError("VECTOR_SEARCH_ENDPOINT is required.")
+        if not index_name or "." not in index_name:
+            raise ValueError("VECTOR_INDEX_NAME must be a full path (catalog.schema.index).")
+        self.client = VectorSearchClient(workspace=ws, disable_notice=True)
+        self.endpoint = endpoint_name
+        self.index = index_name
+        self.columns = columns
+        self._handle = None
 
-# ------------- Environment / Config -------------
-DATABRICKS_HOST = os.getenv("DATABRICKS_HOST")  # required for OBO and SDKs
-VECTOR_SEARCH_ENDPOINT = os.getenv("VECTOR_SEARCH_ENDPOINT")  # e.g., 'dbdemos_vs_endpoint'
-VECTOR_INDEX_NAME = os.getenv("VECTOR_INDEX_NAME", "users.kevin_ippen.voc_pizza_chunks_for_index")
-LLM_ENDPOINT = os.getenv("LLM_ENDPOINT")  # e.g., 'databricks-gpt-oss-20b'
-SQL_WAREHOUSE_HTTP_PATH = os.getenv("SQL_WAREHOUSE_HTTP_PATH", "/sql/1.0/warehouses/REPLACE_ME")
+    def _get_index(self):
+        if self._handle is None:
+            self._handle = self.client.get_index(endpoint_name=self.endpoint, index_name=self.index)
+        return self._handle
 
-# Index schema (as provided)
-SEARCH_COLUMNS: List[str] = [
-    "id",
-    "text",
-    "text_with_context",
-    "source_record_id",
-    "satisfaction",
-    "service_method",
-    "customer_type",
-    "order_source",
-    "order_date",
-    "service_time",
-    "chunk_length",
-    "chunk_word_count",
-]
+    @staticmethod
+    def _expr(satisfaction: Optional[str], service_method: Optional[str],
+              customer_type: Optional[str], order_source: Optional[str]) -> Optional[str]:
+        parts = []
+        if satisfaction:    parts.append(f"satisfaction = '{satisfaction}'")
+        if service_method:  parts.append(f"service_method = '{service_method}'")
+        if customer_type:   parts.append(f"customer_type = '{customer_type}'")
+        if order_source:    parts.append(f"order_source = '{order_source}'")
+        return " AND ".join(parts) if parts else None
 
-# ------------- Helpers -------------
-def _normalize_nullable(s: Optional[str]) -> Optional[str]:
-    """Return None for empty/whitespace strings; strip otherwise."""
-    if s is None:
-        return None
-    s2 = s.strip()
-    return s2 if s2 else None
-
-def _make_filter_expr(
-    satisfaction: Optional[str] = None,
-    service_method: Optional[str] = None,
-    customer_type: Optional[str] = None,
-    order_source: Optional[str] = None,
-) -> Optional[str]:
-    """
-    Build a Vector Search 'expr' filter matching your schema.
-    Assumes exact, case-sensitive matches on string columns.
-    """
-    exprs = []
-    if satisfaction:
-        exprs.append(f"satisfaction = '{satisfaction}'")
-    if service_method:
-        exprs.append(f"service_method = '{service_method}'")
-    if customer_type:
-        exprs.append(f"customer_type = '{customer_type}'")
-    if order_source:
-        exprs.append(f"order_source = '{order_source}'")
-    return " AND ".join(exprs) if exprs else None
-
-
-# ------------- Clients / RAG Init -------------
-@st.cache_resource(show_spinner=True)
-def initialize_clients():
-    """
-    Initialize clients for Vector Search + MLflow Deployments and validate basics.
-    Raises with helpful messages if required envs are missing.
-    """
-    if not DATABRICKS_HOST:
-        raise RuntimeError("DATABRICKS_HOST is not set. Add it in app env.")
-
-    if not VECTOR_SEARCH_ENDPOINT:
-        raise RuntimeError("VECTOR_SEARCH_ENDPOINT is not set. Add it in app env.")
-    if not VECTOR_INDEX_NAME:
-        raise RuntimeError("VECTOR_INDEX_NAME is not set. Add it in app env.")
-
-    # Vector Search
-    vsc = VectorSearchClient()
-    index = vsc.get_index(
-        endpoint_name=VECTOR_SEARCH_ENDPOINT,
-        index_name=VECTOR_INDEX_NAME,
-    )
-
-    # LLM (optional – we keep app working even if not configured)
-    deploy_client = None
-    if LLM_ENDPOINT:
+    def search(self, query_text: str, top_k: int = 25,
+               satisfaction: Optional[str] = None,
+               service_method: Optional[str] = None,
+               customer_type: Optional[str] = None,
+               order_source: Optional[str] = None) -> List[Dict[str, Any]]:
+        idx = self._get_index()
+        expr = self._expr(satisfaction, service_method, customer_type, order_source)
+        params: Dict[str, Any] = {"query_text": query_text, "columns": self.columns, "num_results": max(1, int(top_k))}
+        if expr:
+            params["filters"] = {"expr": expr}
         try:
-            deploy_client = get_deploy_client("databricks")
+            res = idx.similarity_search(**params) or {}
+            result = res.get("result", {})
+            rows = result.get("data_array", []) or []
+            cols = result.get("columns", self.columns)
+            return [dict(zip(cols, r)) for r in rows]
         except Exception as e:
-            log.warning("Failed to init MLflow deployments client: %s", e)
+            log.error("Vector search failed: %s", e, exc_info=True)
+            return []
 
-    return {"vsc": vsc, "index": index, "deploy_client": deploy_client}
 
-
-def call_llm(prompt: str, system_message: Optional[str] = None,
-             temperature: float = 0.2, max_tokens: int = 512) -> str:
-    """
-    Calls a Databricks model serving endpoint via MLflow Deployments with a chat-style payload.
-    Requires LLM_ENDPOINT env var to be set to the serving endpoint name.
-    """
+# ------------- LLM call (optional) -------------
+def call_llm(prompt: str, system: Optional[str] = None, temperature: float = 0.2, max_tokens: int = 512) -> str:
     if not LLM_ENDPOINT:
-        raise RuntimeError("LLM_ENDPOINT not configured in env; cannot call LLM.")
-
+        raise RuntimeError("LLM_ENDPOINT not set.")
     client = get_deploy_client("databricks")
     messages = []
-    if system_message:
-        messages.append({"role": "system", "content": system_message})
+    if system:
+        messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
-
-    payload = {"messages": messages, "temperature": temperature, "max_tokens": max_tokens}
-    resp = client.predict(endpoint=LLM_ENDPOINT, inputs=payload)
-
-    # Common response shapes
+    resp = client.predict(endpoint=LLM_ENDPOINT, inputs={"messages": messages, "temperature": temperature, "max_tokens": max_tokens})
     if isinstance(resp, dict):
         if "choices" in resp and resp["choices"]:
             return resp["choices"][0]["message"]["content"]
@@ -171,100 +139,87 @@ def call_llm(prompt: str, system_message: Optional[str] = None,
     return json.dumps(resp)
 
 
-def vs_search(index, query_text: str, top_k: int,
-              satisfaction: Optional[str], service_method: Optional[str],
-              customer_type: Optional[str], order_source: Optional[str]) -> List[Dict]:
-    """Vector Search similarity with optional expr filter; returns list of dict rows."""
-    expr = _make_filter_expr(
-        _normalize_nullable(satisfaction),
-        _normalize_nullable(service_method),
-        _normalize_nullable(customer_type),
-        _normalize_nullable(order_source),
-    )
-    filters = {"expr": expr} if expr else None
-
-    results = index.similarity_search(
-        query_text=query_text,
-        columns=SEARCH_COLUMNS,
-        num_results=top_k,
-        filters=filters
-    )
-    rows = results.get("result", {}).get("data_array", [])
-    cols = results.get("result", {}).get("columns", SEARCH_COLUMNS)
-    return [dict(zip(cols, r)) for r in rows]
-
-
-# ------------- UI: Header -------------
+# ------------- Header / env checks -------------
 st.title("🍕 Pizza VOC Explorer")
 
-with st.expander("Environment check (safe to share)"):
+with st.expander("Auth env check"):
     st.write({
-        "DATABRICKS_HOST set": bool(DATABRICKS_HOST),
-        "VECTOR_SEARCH_ENDPOINT": VECTOR_SEARCH_ENDPOINT or "(unset)",
-        "VECTOR_INDEX_NAME": VECTOR_INDEX_NAME or "(unset)",
+        "HOST set": bool(DATABRICKS_HOST),
+        "CLIENT_ID set": bool(os.getenv("DATABRICKS_CLIENT_ID")),
+        "CLIENT_SECRET set": bool(os.getenv("DATABRICKS_CLIENT_SECRET")),
+        "AUTH_TYPE": os.getenv("DATABRICKS_AUTH_TYPE"),
+    })
+with st.expander("App env check"):
+    st.write({
+        "VECTOR_SEARCH_ENDPOINT": VECTOR_SEARCH_ENDPOINT,
+        "VECTOR_INDEX_NAME": VECTOR_INDEX_NAME,
         "LLM_ENDPOINT": LLM_ENDPOINT or "(unset)",
-        "SQL_WAREHOUSE_HTTP_PATH": SQL_WAREHOUSE_HTTP_PATH or "(unset)",
     })
 
-# ------------- RAG / Search Panel -------------
+# Prove Workspace auth now (fail fast if wrong)
+with st.expander("Workspace auth probe"):
+    try:
+        me = WS.current_user.me()
+        st.success(f"Authenticated as: {me.user_name}")
+    except Exception as e:
+        st.error(f"WorkspaceClient failed: {e}")
+        st.stop()
+
+# Build Vector Search manager
+try:
+    VSM = VectorSearchManager(
+        ws=WS,
+        endpoint_name=VECTOR_SEARCH_ENDPOINT,
+        index_name=VECTOR_INDEX_NAME,
+        columns=SEARCH_COLUMNS,
+    )
+except Exception as e:
+    st.error(f"Failed to initialize RAG system: {e}")
+    st.stop()
+
+
+# ------------- Search UI -------------
 st.subheader("Find and summarize customer feedback")
 
 query = st.text_input("Search phrase", "late delivery cold pizza")
-col_a, col_b, col_c, col_d, col_k = st.columns([1,1,1,1,1])
-with col_a:
-    satisfaction = st.selectbox("Satisfaction", ["", "Satisfied", "Neutral", "Dissatisfied"])
-with col_b:
-    service_method = st.selectbox("Service method", ["", "Delivery", "Pickup"])
-with col_c:
-    customer_type = st.selectbox("Customer type", ["", "New", "Returning"])
-with col_d:
-    order_source = st.selectbox("Order source", ["", "App", "Web", "Phone"])
-with col_k:
+c1, c2, c3, c4, c5 = st.columns([1,1,1,1,1])
+with c1:
+    satisfaction = st.selectbox("Satisfaction", SATISFACTION_VALUES)
+with c2:
+    service_method = st.selectbox("Service method", SERVICE_METHOD_VALUES)
+with c3:
+    customer_type = st.selectbox("Customer type", CUSTOMER_TYPE_VALUES)
+with c4:
+    order_source = st.selectbox("Order source", ORDER_SOURCE_VALUES)
+with c5:
     top_k = st.number_input("Top K", min_value=1, max_value=200, value=25, step=1)
 
-search_btn = st.button("Search")
+if st.button("Search"):
+    with st.spinner("Searching Vector Index…"):
+        rows = VSM.search(
+            query_text=query,
+            top_k=top_k,
+            satisfaction=satisfaction or None,
+            service_method=service_method or None,
+            customer_type=customer_type or None,
+            order_source=order_source or None,
+        )
+    st.write(f"Found {len(rows)} results")
+    if rows:
+        df = pd.DataFrame(rows)
+        st.dataframe(df, use_container_width=True)
 
-clients = None
-init_error = None
-try:
-    clients = initialize_clients()
-except Exception as e:
-    init_error = e
-
-if init_error:
-    st.error(f"Failed to initialize RAG system: {init_error}")
-elif search_btn:
-    try:
-        with st.spinner("Searching feedback..."):
-            results = vs_search(
-                clients["index"],
-                query,
-                top_k,
-                satisfaction,
-                service_method,
-                customer_type,
-                order_source
-            )
-        st.success(f"Found {len(results)} results")
-        if results:
-            df = pd.DataFrame(results)
-            st.dataframe(df, use_container_width=True)
-
-            if clients["deploy_client"] and LLM_ENDPOINT:
-                try:
-                    with st.spinner("Summarizing with LLM..."):
-                        preview = df[["text", "satisfaction", "service_method"]].head(10).to_dict(orient="records")
-                        summary = call_llm(
-                            prompt=f"Summarize key customer pain points and themes from these reviews: {preview}",
-                            system_message="You are an analyst who writes concise bullet summaries for restaurant VOC."
-                        )
-                    st.subheader("LLM Summary")
-                    st.write(summary)
-                except Exception as e:
-                    st.warning(f"LLM call failed: {e}")
-            else:
-                st.info("LLM_ENDPOINT not configured; skipping summary.")
-        else:
-            st.info("No results. Try broadening your filters or removing them.")
-    except Exception as e:
-        st.exception(e)
+        if LLM_ENDPOINT:
+            try:
+                preview = df[["text", "satisfaction", "service_method"]].head(10).to_dict(orient="records")
+                with st.spinner("Summarizing with LLM…"):
+                    summary = call_llm(
+                        prompt=f"Summarize key customer pain points and themes from these reviews: {preview}",
+                        system="You are an analyst who writes concise bullet summaries for restaurant VOC."
+                    )
+                st.subheader("LLM Summary")
+                st.write(summary)
+            except Exception as e:
+                st.warning(f"LLM call failed: {e}")
+    else:
+        st.info("No results. Try broadening your filters or removing them.")
